@@ -22,6 +22,7 @@
 #import "CBLMisc.h"
 #import "BLIPHTTPLogic.h"
 #import "MYURLUtils.h"
+#import "CBLHTTPListener.h"
 
 
 // This db will get deleted and overwritten during every test.
@@ -890,6 +891,200 @@
         Log(@"...replicator finished. lastSequence=%@", repl.lastSequence);
         return repl.lastSequence;
     }
+}
+
+
+#pragma mark - CHECKPOINT SEED FROM SIBLING:
+
+
+#define kSeedListenerDBName @"checkpoint_seed_listener"
+#define kSeedLiveDocCount 20
+#define kSeedDeletedDocCount 10
+
+static UInt16 sSeedListenerPort = 60500;
+
+
+// The in-process listener does not implement `active_only`, so the one-shot pull receives the
+// historical tombstones too. What these tests verify is the continuous replicator's starting
+// sequence: seeded, it only processes the changes made after the one-shot; unseeded, it reads
+// the whole feed again.
+- (void) test23_ContinuousSeededFromOneShotCheckpoint {
+    if (_newReplicator)
+        return;     // The seed is implemented in CBLRestReplicator only.
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+
+    NSDictionary* seedOptions = @{kCBLReplicatorOption_SeedCheckpointFromSibling: @YES};
+    [self runOneShotPullFrom: remoteURL options: seedOptions];
+    NSUInteger changesAfterOneShot = [self changeSeedListenerDB: listenerDB];
+
+    id<CBL_Replicator> repl = [self runContinuousPullFrom: remoteURL options: seedOptions];
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual([repl.lastSequence description], listenerLastSequence);
+    AssertEq(repl.changesTotal, changesAfterOneShot);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+- (void) test24_ContinuousNotSeededWithoutOption {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+
+    [self runOneShotPullFrom: remoteURL options: nil];
+    [self changeSeedListenerDB: listenerDB];
+
+    id<CBL_Replicator> repl = [self runContinuousPullFrom: remoteURL options: nil];
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual([repl.lastSequence description], listenerLastSequence);
+    AssertEq(repl.changesTotal, (NSUInteger)listenerDB.documentCount + kSeedDeletedDocCount + 1);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+- (void) test25_ContinuousNotSeededWhenSiblingCheckpointMismatches {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+
+    NSDictionary* seedOptions = @{kCBLReplicatorOption_SeedCheckpointFromSibling: @YES};
+    CBL_ReplicatorSettings* oneShotSettings = [self runOneShotPullFrom: remoteURL options: seedOptions];
+    [self changeSeedListenerDB: listenerDB];
+
+    // Make the local one-shot checkpoint disagree with the listener's copy:
+    NSString* oneShotCheckpointID = [oneShotSettings remoteCheckpointDocIDForLocalUUID: db.privateUUID];
+    Assert([db setLastSequence: @"1" withCheckpointID: oneShotCheckpointID]);
+
+    id<CBL_Replicator> repl = [self runContinuousPullFrom: remoteURL options: seedOptions];
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual([repl.lastSequence description], listenerLastSequence);
+    AssertEq(repl.changesTotal, (NSUInteger)listenerDB.documentCount + kSeedDeletedDocCount + 1);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+- (void) test26_OneShotNotSeededWithoutSiblingCheckpoint {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+
+    NSDictionary* seedOptions = @{kCBLReplicatorOption_SeedCheckpointFromSibling: @YES};
+    CBL_ReplicatorSettings* settings = [[CBL_ReplicatorSettings alloc] initWithRemote: remoteURL push: NO];
+    settings.options = seedOptions;
+    id lastSeq = [self replicate: settings expectError: nil];
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual([lastSeq description], listenerLastSequence);
+    AssertEq(db.documentCount, (unsigned)kSeedLiveDocCount);
+
+    [listener stop];
+}
+
+
+- (CBLListener*) startSeedListenerWithDatabase: (CBLDatabase**)outListenerDB {
+    NSError* error;
+    CBLDatabase* listenerDB = [dbmgr databaseNamed: kSeedListenerDBName error: &error];
+    Assert(listenerDB, @"Couldn't create listener db: %@", error);
+    [listenerDB inTransaction: ^BOOL{
+        for (int i = 1; i <= kSeedLiveDocCount; i++) {
+            CBLUnsavedRevision* rev = listenerDB[$sprintf(@"live-%d", i)].newRevision;
+            rev[@"index"] = @(i);
+            Assert([rev save: NULL]);
+        }
+        for (int i = 1; i <= kSeedDeletedDocCount; i++) {
+            CBLDocument* doc = listenerDB[$sprintf(@"deleted-%d", i)];
+            CBLUnsavedRevision* rev = doc.newRevision;
+            rev[@"index"] = @(i);
+            Assert([rev save: NULL]);
+            Assert([doc deleteDocument: NULL]);
+        }
+        return YES;
+    }];
+
+    UInt16 port = sSeedListenerPort++;
+    CBLListener* listener = [[CBLHTTPListener alloc] initWithManager: dbmgr port: port];
+    [self keyValueObservingExpectationForObject: listener keyPath: @"port" expectedValue: @(port)];
+    Assert([listener start: &error], @"Couldn't start listener: %@", error);
+    [self waitForExpectationsWithTimeout: 5.0 handler: nil];
+    *outListenerDB = listenerDB;
+    return listener;
+}
+
+
+// The host app's ATS exception for ".local" blocks plain HTTP to listener.URL; localhost is allowed.
+- (NSURL*) seedListenerURLForDatabase: (CBLDatabase*)listenerDB listener: (CBLListener*)listener {
+    return [NSURL URLWithString: $sprintf(@"http://localhost:%u/%@", listener.port, listenerDB.name)];
+}
+
+
+// Deletes one live document and creates one; returns the number of changes the feed now holds
+// after the one-shot checkpoint.
+- (NSUInteger) changeSeedListenerDB: (CBLDatabase*)listenerDB {
+    Assert([listenerDB[@"live-1"] deleteDocument: NULL]);
+    CBLUnsavedRevision* rev = listenerDB[@"created-after-one-shot"].newRevision;
+    rev[@"index"] = @(kSeedLiveDocCount + 1);
+    Assert([rev save: NULL]);
+    return 2;
+}
+
+
+- (void) verifyPostOneShotChangesArrived {
+    CBL_RevisionList* deletedAfterOneShot = [db.storage getAllRevisionsOfDocumentID: @"live-1"
+                                                                        onlyCurrent: YES
+                                                                     includeDeleted: YES];
+    AssertEq(deletedAfterOneShot.count, 1u);
+    Assert(deletedAfterOneShot[0].deleted);
+    Assert([db getDocumentWithID: @"created-after-one-shot" revisionID: nil]);
+}
+
+
+- (CBL_ReplicatorSettings*) runOneShotPullFrom: (NSURL*)remoteURL options: (NSDictionary*)options {
+    CBL_ReplicatorSettings* settings = [[CBL_ReplicatorSettings alloc] initWithRemote: remoteURL push: NO];
+    settings.options = options;
+    [self replicate: settings expectError: nil];
+    AssertEq(db.documentCount, (unsigned)kSeedLiveDocCount);
+    return settings;
+}
+
+
+- (id<CBL_Replicator>) runContinuousPullFrom: (NSURL*)remoteURL options: (NSDictionary*)options {
+    CBL_ReplicatorSettings* settings = [[CBL_ReplicatorSettings alloc] initWithRemote: remoteURL push: NO];
+    settings.continuous = YES;
+    settings.options = options;
+    id<CBL_Replicator> repl = [[dbmgr.replicatorClass alloc] initWithDB: db settings: settings];
+    [repl start];
+
+    Assert(repl.status != kCBLReplicatorStopped);
+    NSDate* timeout = [NSDate dateWithTimeIntervalSinceNow: 10];
+    bool wasActive = repl.active;
+    BOOL stopping = NO;
+    while ((repl.status != kCBLReplicatorStopped || repl.savingCheckpoint) && timeout.timeIntervalSinceNow > 0.0) {
+        if (![[NSRunLoop currentRunLoop] runMode: NSDefaultRunLoopMode
+                                      beforeDate: [NSDate dateWithTimeIntervalSinceNow: 0.5]])
+            break;
+        if (!wasActive) {
+            wasActive = repl.active;
+        } else if (!repl.active && !stopping) {
+            stopping = YES;
+            [repl stop];
+        }
+    }
+    Assert(wasActive && !repl.active);
+    Assert(!repl.savingCheckpoint);
+    AssertNil(repl.error);
+    return repl;
 }
 
 
