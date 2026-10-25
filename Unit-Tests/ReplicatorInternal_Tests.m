@@ -1016,6 +1016,130 @@ static UInt16 sSeedListenerPort = 60500;
 }
 
 
+#pragma mark - RESUME FROM LOCAL CHECKPOINT:
+
+
+// The listener holds sequences 1-40 after setup (20 live docs, then 10 create+delete pairs) and
+// 41-42 after -changeSeedListenerDB:. A local checkpoint rewound to 30 therefore leaves the last
+// five tombstones plus the two post-checkpoint changes in the feed.
+#define kRewoundLocalLastSequence @"30"
+#define kChangesAfterRewoundCheckpoint 7
+
+- (void) test27_ResumesFromLocalCheckpointOnMismatch {
+    if (_newReplicator)
+        return;     // Implemented in CBLRestReplicator only.
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+    NSDictionary* resumeOptions = @{kCBLReplicatorOption_ResumeFromLocalCheckpoint: @YES};
+
+    id<CBL_Replicator> firstRepl = [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    NSString* checkpointID = firstRepl.remoteCheckpointDocID;
+    NSString* remoteLastSequence = [firstRepl.lastSequence description];
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual(remoteLastSequence, listenerLastSequence);
+    [self changeSeedListenerDB: listenerDB];
+    Assert([db setLastSequence: kRewoundLocalLastSequence withCheckpointID: checkpointID]);
+
+    NSDictionary* mismatch = [self captureCheckpointMismatchWhileRunning: ^id<CBL_Replicator> {
+        return [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    }];
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey],
+                kRewoundLocalLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey], remoteLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchResumedFromLocalKey], @YES);
+    AssertEq([mismatch[@"changesTotal"] unsignedIntegerValue], (NSUInteger)kChangesAfterRewoundCheckpoint);
+    listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual(mismatch[@"lastSequence"], listenerLastSequence);
+    AssertEqual([db lastSequenceWithCheckpointID: checkpointID], listenerLastSequence);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+- (void) test28_ReplicatesFromScratchOnMismatchWithoutOption {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+
+    id<CBL_Replicator> firstRepl = [self runContinuousPullFrom: remoteURL options: nil];
+    NSString* checkpointID = firstRepl.remoteCheckpointDocID;
+    NSString* remoteLastSequence = [firstRepl.lastSequence description];
+    [self changeSeedListenerDB: listenerDB];
+    Assert([db setLastSequence: kRewoundLocalLastSequence withCheckpointID: checkpointID]);
+
+    NSDictionary* mismatch = [self captureCheckpointMismatchWhileRunning: ^id<CBL_Replicator> {
+        return [self runContinuousPullFrom: remoteURL options: nil];
+    }];
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey],
+                kRewoundLocalLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey], remoteLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchResumedFromLocalKey], @NO);
+    AssertEq([mismatch[@"changesTotal"] unsignedIntegerValue],
+             (NSUInteger)listenerDB.documentCount + kSeedDeletedDocCount + 1);
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual(mismatch[@"lastSequence"], listenerLastSequence);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+- (void) test29_ReplicatesFromScratchWhenRemoteCheckpointIsMissing {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+    NSDictionary* resumeOptions = @{kCBLReplicatorOption_ResumeFromLocalCheckpoint: @YES};
+
+    id<CBL_Replicator> firstRepl = [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    NSString* checkpointID = firstRepl.remoteCheckpointDocID;
+    NSString* localLastSequence = [db lastSequenceWithCheckpointID: checkpointID];
+    AssertEqual(localLastSequence, [firstRepl.lastSequence description]);
+    [self changeSeedListenerDB: listenerDB];
+    Assert([listenerDB deleteLocalDocumentWithID: checkpointID error: NULL]);
+
+    NSDictionary* mismatch = [self captureCheckpointMismatchWhileRunning: ^id<CBL_Replicator> {
+        return [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    }];
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey], localLastSequence);
+    AssertNil(mismatch[CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey]);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchResumedFromLocalKey], @NO);
+    AssertEq([mismatch[@"changesTotal"] unsignedIntegerValue],
+             (NSUInteger)listenerDB.documentCount + kSeedDeletedDocCount + 1);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+// Runs the replicator produced by `block` while observing CBL_ReplicatorCheckpointMismatchNotification.
+// Returns the notification's userInfo extended with the finished replicator's "changesTotal" and
+// "lastSequence", and asserts that exactly one mismatch was posted.
+- (NSDictionary*) captureCheckpointMismatchWhileRunning: (id<CBL_Replicator> (^)(void))block {
+    NSMutableArray* mismatches = [NSMutableArray array];
+    id observer = [[NSNotificationCenter defaultCenter]
+                    addObserverForName: CBL_ReplicatorCheckpointMismatchNotification
+                                object: nil
+                                 queue: nil
+                            usingBlock: ^(NSNotification* n) {
+                                [mismatches addObject: n.userInfo];
+                            }];
+    id<CBL_Replicator> repl = block();
+    [[NSNotificationCenter defaultCenter] removeObserver: observer];
+
+    AssertEq(mismatches.count, 1u);
+    NSMutableDictionary* result = [mismatches[0] mutableCopy];
+    result[@"changesTotal"] = @(repl.changesTotal);
+    [result setValue: [repl.lastSequence description] forKey: @"lastSequence"];
+    return result;
+}
+
+
 - (CBLListener*) startSeedListenerWithDatabase: (CBLDatabase**)outListenerDB {
     NSError* error;
     CBLDatabase* listenerDB = [dbmgr databaseNamed: kSeedListenerDBName error: &error];

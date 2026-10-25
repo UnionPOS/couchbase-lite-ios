@@ -805,8 +805,23 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
                           LogTo(Sync, @"%@: Replicating from lastSequence=%@%@", self, _lastSequence,
                                 (isSibling ? @" (seeded from sibling checkpoint)" : @""));
                       } else {
-                          LogTo(Sync, @"%@: lastSequence mismatch: I had %@, remote had %@ (response = %@)",
-                                self, localLastSequence, remoteLastSequence, response);
+                          // A remote checkpoint doc that exists but disagrees means the same
+                          // remote database saw an interrupted save; the local sequence is
+                          // where this database actually got to. A missing remote doc means
+                          // the remote database was reset, so a full replication is required.
+                          BOOL resumeFromLocal = _settings.resumesFromLocalCheckpoint
+                                                 && !isSibling && localLastSequence != nil
+                                                 && response != nil;
+                          if (resumeFromLocal)
+                              _lastSequence = localLastSequence;
+                          LogTo(Sync, @"%@: lastSequence mismatch: I had %@, remote had %@%@ (response = %@)",
+                                self, localLastSequence, remoteLastSequence,
+                                (resumeFromLocal ? @"; resuming from local checkpoint"
+                                                 : @"; replicating from scratch"),
+                                response);
+                          [self postCheckpointMismatchWithLocalLastSequence: localLastSequence
+                                                         remoteLastSequence: remoteLastSequence
+                                                           resumedFromLocal: resumeFromLocal];
                       }
                       [self beginReplicating];
                   }
@@ -814,6 +829,23 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
           }
      ];
     [request dontLog404];
+}
+
+
+- (void) postCheckpointMismatchWithLocalLastSequence: (NSString*)localLastSequence
+                                  remoteLastSequence: (NSString*)remoteLastSequence
+                                    resumedFromLocal: (BOOL)resumedFromLocal
+{
+    NSMutableDictionary* userInfo = $mdict({CBL_ReplicatorCheckpointMismatchResumedFromLocalKey,
+                                            @(resumedFromLocal)});
+    [userInfo setValue: localLastSequence
+                forKey: CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey];
+    [userInfo setValue: remoteLastSequence
+                forKey: CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey];
+    [[NSNotificationCenter defaultCenter]
+            postNotificationName: CBL_ReplicatorCheckpointMismatchNotification
+                          object: self
+                        userInfo: userInfo];
 }
 
 
@@ -873,6 +905,12 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
     _savingCheckpoint = YES;
     [self asyncTaskStarted];
     NSString* checkpointID = self.remoteCheckpointDocID;
+    if (_settings.resumesFromLocalCheckpoint) {
+        // Record the sequence locally first so that a process kill during the PUT leaves the
+        // local checkpoint at the sequence actually processed, which is what the next launch
+        // resumes from on mismatch.
+        [_db setLastSequence: [lastSequence description] withCheckpointID: checkpointID];
+    }
     CBLRemoteRequest* request = [_remoteSession startRequest: @"PUT"
                           path: [@"_local/" stringByAppendingString: checkpointID]
                           body: body

@@ -58,6 +58,12 @@ typedef CBL_Revision* (^RevisionBodyTransformationBlock)(CBL_Revision*);
     replicator's checkpoint. (Derived from options key "seed_checkpoint_from_sibling".) */
 @property (readonly) BOOL seedsCheckpointFromSibling;
 
+/** Whether a replicator whose remote checkpoint document exists but disagrees with the local
+    checkpoint resumes from the local sequence instead of replicating from scratch, and saves
+    the local checkpoint before updating the remote one.
+    (Derived from options key "resume_from_local_checkpoint".) */
+@property (readonly) BOOL resumesFromLocalCheckpoint;
+
 /** Timeout interval for HTTP requests sent by this replicator.
     (Derived from options key "connection_timeout", in milliseconds.) */
 @property (readonly) NSTimeInterval requestTimeout;
@@ -102,6 +108,7 @@ typedef CBL_Revision* (^RevisionBodyTransformationBlock)(CBL_Revision*);
 #define kCBLReplicatorOption_AllNew @"allNew"               // Boolean; default is NO
 #define kCBLReplicatorOption_Attachments @"attachments"     // Boolean; default is YES
 #define kCBLReplicatorOption_SeedCheckpointFromSibling @"seed_checkpoint_from_sibling" // Boolean; default is NO
+#define kCBLReplicatorOption_ResumeFromLocalCheckpoint @"resume_from_local_checkpoint" // Boolean; default is NO
 
 // Boolean; default is YES. Setting this option will have no effect and result to always 'trust' if
 // the kCBLReplicatorOption_Network option is also set.
