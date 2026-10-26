@@ -1536,4 +1536,99 @@ static NSString* const kUntrackedDocumentType = @"untracked";
 }
 
 
+#pragma mark - MULTIPLE DOCUMENT TYPES:
+
+
+- (void) test30_DocumentTypes_RoundTripsThroughDocumentType {
+    CBLView* view = [db viewNamed: @"test/docTypes"];
+    AssertNil(view.documentType);
+    AssertNil(view.documentTypes);
+
+    view.documentType = @"person";
+    AssertEqual(view.documentTypes, @[@"person"]);
+
+    view.documentTypes = @[@"person", @"aardvark"];
+    AssertNil(view.documentType);
+    AssertEqual(view.documentTypes, (@[@"person", @"aardvark"]));
+
+    view.documentTypes = @[];
+    AssertNil(view.documentTypes);
+
+    view.documentType = @"elf";
+    view.documentType = nil;
+    AssertNil(view.documentTypes);
+}
+
+
+- (void) test31_DocumentTypes_IndexesOnlyDeclaredTypes {
+    if (!self.isSQLiteDB)
+        return;     // ForestDB storage filters by a single documentType only.
+    CBLView* view = [db viewNamed: @"test/peopleAndAardvarks"];
+    view.documentTypes = @[@"person", @"aardvark"];
+    [view setMapBlock: MAPBLOCK({
+        Assert([doc[@"type"] isEqual: @"person"] || [doc[@"type"] isEqual: @"aardvark"],
+               @"Mapped a %@ document", doc[@"type"]);
+        emit(doc[@"name"], nil);
+    }) version: @"1"];
+
+    [self createDocumentWithProperties: @{@"type": @"person", @"name": @"mick"}];
+    [self createDocumentWithProperties: @{@"type": @"person", @"name": @"keef"}];
+    CBLDocument* cerebus = [self createDocumentWithProperties: @{@"type": @"aardvark", @"name": @"cerebus"}];
+    CBLDocument* elf = [self createDocumentWithProperties: @{@"type": @"elf", @"name": @"regency elf"}];
+
+    CBLQuery* query = [view createQuery];
+    NSArray* allRows = [query run: NULL].allObjects;
+    AssertEq(allRows.count, 3u);
+    AssertEqual([allRows[0] key], @"cerebus");
+    AssertEqual([allRows[1] key], @"keef");
+    AssertEqual([allRows[2] key], @"mick");
+
+    Assert([elf update: ^BOOL(CBLUnsavedRevision* rev) {
+        rev[@"type"] = @"person";
+        return YES;
+    } error: NULL]);
+    allRows = [query run: NULL].allObjects;
+    AssertEq(allRows.count, 4u);
+
+    Assert([cerebus update: ^BOOL(CBLUnsavedRevision* rev) {
+        rev[@"type"] = @"elf";
+        return YES;
+    } error: NULL]);
+    allRows = [query run: NULL].allObjects;
+    AssertEq(allRows.count, 3u);
+    AssertEqual([allRows[0] key], @"keef");
+}
+
+
+// Views sharing a name prefix are indexed in one pass, so this exercises the per-view type check
+// with one multi-type view and one single-type view in the same pass.
+- (void) test32_DocumentTypes_MixedGroupIndexedTogether {
+    if (!self.isSQLiteDB)
+        return;     // ForestDB storage filters by a single documentType only.
+    CBLView* multi = [db viewNamed: @"grp/peopleAndAardvarks"];
+    multi.documentTypes = @[@"person", @"aardvark"];
+    [multi setMapBlock: MAPBLOCK({
+        Assert([doc[@"type"] isEqual: @"person"] || [doc[@"type"] isEqual: @"aardvark"],
+               @"Mapped a %@ document", doc[@"type"]);
+        emit(doc[@"name"], nil);
+    }) version: @"1"];
+
+    CBLView* single = [db viewNamed: @"grp/aardvarks"];
+    single.documentType = @"aardvark";
+    [single setMapBlock: MAPBLOCK({
+        AssertEqual(doc[@"type"], @"aardvark");
+        emit(doc[@"name"], nil);
+    }) version: @"1"];
+
+    [self createDocumentWithProperties: @{@"type": @"person", @"name": @"mick"}];
+    [self createDocumentWithProperties: @{@"type": @"aardvark", @"name": @"cerebus"}];
+    [self createDocumentWithProperties: @{@"type": @"elf", @"name": @"regency elf"}];
+
+    AssertEq([[multi createQuery] run: NULL].allObjects.count, 2u);
+    AssertEq([[single createQuery] run: NULL].allObjects.count, 1u);
+    AssertEq(multi.lastSequenceIndexed, db.lastSequenceNumber);
+    AssertEq(single.lastSequenceIndexed, db.lastSequenceNumber);
+}
+
+
 @end

@@ -347,12 +347,12 @@ void CBL_SQLiteViewStorageSetTracksIndexChanges(BOOL tracks) {
                 minLastSequence = MIN(minLastSequence, last);
                 LogVerbose(View, @"    %@ last indexed at #%lld", view.name, last);
 
-                NSString* docType = delegate.documentType;
-                if (docType) {
-                    [docTypes addObject: docType];
+                NSArray* viewDocTypeList = delegate.documentTypes;
+                if (viewDocTypeList.count > 0) {
+                    [docTypes addObjectsFromArray: viewDocTypeList];
                     if (!viewDocTypes)
                         viewDocTypes = [NSMutableDictionary dictionary];
-                    viewDocTypes[view.name] = docType;
+                    viewDocTypes[view.name] = [NSSet setWithArray: viewDocTypeList];
                 } else {
                     allDocTypes = YES; // can't filter by doc_type
                 }
@@ -529,9 +529,9 @@ void CBL_SQLiteViewStorageSetTracksIndexChanges(BOOL tracks) {
                     ++i;
                     if (viewLastSequence[i] < realSequence) {
                         if (checkDocTypes) {
-                            NSString* viewDocType = viewDocTypes[curView.name];
-                            if (viewDocType && ![viewDocType isEqual: docType])
-                                continue; // skip; view's documentType doesn't match this doc
+                            NSSet* viewDocTypeSet = viewDocTypes[curView.name];
+                            if (viewDocTypeSet && ![viewDocTypeSet containsObject: docType])
+                                continue; // skip; view's documentTypes don't include this doc's
                         }
                         LogVerbose(View, @"#%lld: map \"%@\" for view %@...",
                               sequence, docID, curView.name);

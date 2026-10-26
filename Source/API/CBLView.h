@@ -93,6 +93,14 @@ FOUNDATION_EXTERN id CBLTextKey(NSString* text);
     the view is queried. And if its value changes, the view's version also needs to change. */
 @property (copy) NSString* documentType;
 
+/** Union extension. Like `documentType`, but for a view that indexes several document types: only
+    documents whose "type" property is one of these values are passed to the map block. Setting
+    `documentType` replaces this with a one-element array; reading `documentType` returns the sole
+    element, or nil when there are several. Not persistent, and a change needs a new view version,
+    just like `documentType`. SQLite storage filters on all of them; ForestDB storage filters only
+    when there is exactly one and otherwise passes every document to the map block. */
+@property (copy) NSArray<NSString*>* documentTypes;
+
 /** Is the view's index currently out of date? */
 @property (readonly) BOOL stale;
 

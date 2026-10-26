@@ -109,7 +109,10 @@ UsingLogDomain(Query);
     called to notify it, so it can invalidate the index. */
 @property (readonly) NSString* mapVersion;
 
-/** The document "type" property values this view is filtered to (nil if none.) */
+/** The document "type" property value this view is filtered to (nil if none, or if several.) */
 @property (readonly) NSString* documentType;
+
+/** The document "type" property values this view is filtered to (nil if none.) */
+@property (readonly) NSArray<NSString*>* documentTypes;
 
 @end
