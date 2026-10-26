@@ -1117,6 +1117,42 @@ static UInt16 sSeedListenerPort = 60500;
 }
 
 
+#define kRolledBackRemoteLastSequence @"20"
+
+- (void) test30_ReplicatesFromScratchWhenRemoteCheckpointIsBehindLocal {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+    NSDictionary* resumeOptions = @{kCBLReplicatorOption_ResumeFromLocalCheckpoint: @YES};
+
+    id<CBL_Replicator> firstRepl = [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    NSString* checkpointID = firstRepl.remoteCheckpointDocID;
+    [self changeSeedListenerDB: listenerDB];
+    Assert([db setLastSequence: kRewoundLocalLastSequence withCheckpointID: checkpointID]);
+    Assert([listenerDB putLocalDocument: @{@"lastSequence": kRolledBackRemoteLastSequence}
+                                 withID: checkpointID
+                                  error: NULL]);
+
+    NSDictionary* mismatch = [self captureCheckpointMismatchWhileRunning: ^id<CBL_Replicator> {
+        return [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    }];
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey],
+                kRewoundLocalLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey],
+                kRolledBackRemoteLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchResumedFromLocalKey], @NO);
+    AssertEq([mismatch[@"changesTotal"] unsignedIntegerValue],
+             (NSUInteger)listenerDB.documentCount + kSeedDeletedDocCount + 1);
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual(mismatch[@"lastSequence"], listenerLastSequence);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
 // Runs the replicator produced by `block` while observing CBL_ReplicatorCheckpointMismatchNotification.
 // Returns the notification's userInfo extended with the finished replicator's "changesTotal" and
 // "lastSequence", and asserts that exactly one mismatch was posted.

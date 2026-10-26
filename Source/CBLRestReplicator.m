@@ -754,6 +754,30 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
 }
 
 
+// Checkpoint sequences are integer strings, optionally followed by a ':'-separated suffix
+// (Sync Gateway compound sequences). Returns NO when either sequence has another format.
+static BOOL parseLeadingSequence(id sequence, SInt64* outSequence) {
+    NSString* string = [sequence description];
+    if (string.length == 0)
+        return NO;
+    NSScanner* scanner = [NSScanner scannerWithString: string];
+    scanner.charactersToBeSkipped = nil;
+    if (![scanner scanLongLong: outSequence] || *outSequence < 0)
+        return NO;
+    return scanner.isAtEnd || [string characterAtIndex: scanner.scanLocation] == ':';
+}
+
+
+// Whether `remoteSequence` is at or past `localSequence`, so that resuming from the local
+// checkpoint cannot skip changes the remote database no longer has.
+static BOOL remoteSequenceIsAtLeastLocal(id remoteSequence, id localSequence) {
+    SInt64 remote, local;
+    return parseLeadingSequence(remoteSequence, &remote)
+        && parseLeadingSequence(localSequence, &local)
+        && remote >= local;
+}
+
+
 // Fetches the given remote checkpoint doc and starts replicating from its sequence when it agrees
 // with the local one. A sibling checkpoint only seeds _lastSequence: it is never stored as this
 // replicator's own remote checkpoint, so the first -saveLastSequence creates our own doc.
@@ -805,13 +829,17 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
                           LogTo(Sync, @"%@: Replicating from lastSequence=%@%@", self, _lastSequence,
                                 (isSibling ? @" (seeded from sibling checkpoint)" : @""));
                       } else {
-                          // A remote checkpoint doc that exists but disagrees means the same
-                          // remote database saw an interrupted save; the local sequence is
-                          // where this database actually got to. A missing remote doc means
-                          // the remote database was reset, so a full replication is required.
+                          // A remote checkpoint doc that exists but is ahead of the local one
+                          // means the same remote database saw an interrupted save; the local
+                          // sequence is where this database actually got to. A missing remote
+                          // doc means the remote database was reset, and a remote doc behind
+                          // the local one means the remote database was rolled back; either
+                          // way a full replication is required.
                           BOOL resumeFromLocal = _settings.resumesFromLocalCheckpoint
                                                  && !isSibling && localLastSequence != nil
-                                                 && response != nil;
+                                                 && response != nil
+                                                 && remoteSequenceIsAtLeastLocal(remoteLastSequence,
+                                                                                 localLastSequence);
                           if (resumeFromLocal)
                               _lastSequence = localLastSequence;
                           LogTo(Sync, @"%@: lastSequence mismatch: I had %@, remote had %@%@ (response = %@)",
