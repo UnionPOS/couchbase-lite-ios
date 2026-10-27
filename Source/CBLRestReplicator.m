@@ -727,7 +727,8 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
     if (!localLastSequence && ![self getLastSequenceFromLocalCheckpointDocument]) {
         NSString* siblingCheckpointID = nil;
         NSString* siblingLastSequence = nil;
-        if (_settings.seedsCheckpointFromSibling) {
+        BOOL resetRequested = _settings.options[kCBLReplicatorOption_Reset] != nil;
+        if (_settings.seedsCheckpointFromSibling && !resetRequested) {
             siblingCheckpointID = [_settings siblingRemoteCheckpointDocIDForLocalUUID: _db.privateUUID];
             siblingLastSequence = [_db lastSequenceWithCheckpointID: siblingCheckpointID];
         }
@@ -780,12 +781,10 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
                   if (error && error.code != kCBLStatusNotFound) {
                       LogTo(Sync, @"%@: Error fetching last sequence: %@",
                             self, error.my_compactDescription);
-                      if (isSibling) {
-                          [self maybeCreateRemoteDB];
-                          [self beginReplicating];
-                      } else {
-                          self.error = error;
-                      }
+                      // Same as for our own checkpoint: a transient failure must not start a
+                      // replication from sequence 0, so surface the error and let the next
+                      // start retry.
+                      self.error = error;
                   } else {
                       if (error.code == kCBLStatusNotFound)
                           [self maybeCreateRemoteDB];

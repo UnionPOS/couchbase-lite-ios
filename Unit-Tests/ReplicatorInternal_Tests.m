@@ -993,6 +993,29 @@ static UInt16 sSeedListenerPort = 60500;
 }
 
 
+- (void) test26a_ContinuousNotSeededWhenResetRequested {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+
+    NSDictionary* seedOptions = @{kCBLReplicatorOption_SeedCheckpointFromSibling: @YES};
+    [self runOneShotPullFrom: remoteURL options: seedOptions];
+    [self changeSeedListenerDB: listenerDB];
+
+    NSDictionary* seedAndResetOptions = @{kCBLReplicatorOption_SeedCheckpointFromSibling: @YES,
+                                          kCBLReplicatorOption_Reset: @YES};
+    id<CBL_Replicator> repl = [self runContinuousPullFrom: remoteURL options: seedAndResetOptions];
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual([repl.lastSequence description], listenerLastSequence);
+    AssertEq(repl.changesTotal, (NSUInteger)listenerDB.documentCount + kSeedDeletedDocCount + 1);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
 - (CBLListener*) startSeedListenerWithDatabase: (CBLDatabase**)outListenerDB {
     NSError* error;
     CBLDatabase* listenerDB = [dbmgr databaseNamed: kSeedListenerDBName error: &error];
