@@ -725,12 +725,42 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
     NSString* localLastSequence = [_db lastSequenceWithCheckpointID: checkpointID];
 
     if (!localLastSequence && ![self getLastSequenceFromLocalCheckpointDocument]) {
-        LogTo(Sync, @"%@: No local checkpoint; not getting remote one", self);
-        [self maybeCreateRemoteDB];
-        [self beginReplicating];
+        NSString* siblingCheckpointID = nil;
+        NSString* siblingLastSequence = nil;
+        BOOL resetRequested = _settings.options[kCBLReplicatorOption_Reset] != nil;
+        if (_settings.seedsCheckpointFromSibling && !resetRequested) {
+            siblingCheckpointID = [_settings siblingRemoteCheckpointDocIDForLocalUUID: _db.privateUUID];
+            siblingLastSequence = [_db lastSequenceWithCheckpointID: siblingCheckpointID];
+        }
+        if (!siblingLastSequence) {
+            LogTo(Sync, @"%@: No local checkpoint; not getting remote one", self);
+            [self maybeCreateRemoteDB];
+            [self beginReplicating];
+            return;
+        }
+        // Seeding assumes the one-shot and continuous replicators for the same remote never run
+        // at the same time; otherwise the sibling's checkpoint could move while we read it.
+        LogTo(Sync, @"%@: No local checkpoint; seeding from sibling checkpoint %@ (lastSequence=%@)",
+              self, siblingCheckpointID, siblingLastSequence);
+        [self fetchRemoteCheckpointDocWithID: siblingCheckpointID
+                           localLastSequence: siblingLastSequence
+                                   isSibling: YES];
         return;
     }
-    
+
+    [self fetchRemoteCheckpointDocWithID: checkpointID
+                       localLastSequence: localLastSequence
+                               isSibling: NO];
+}
+
+
+// Fetches the given remote checkpoint doc and starts replicating from its sequence when it agrees
+// with the local one. A sibling checkpoint only seeds _lastSequence: it is never stored as this
+// replicator's own remote checkpoint, so the first -saveLastSequence creates our own doc.
+- (void) fetchRemoteCheckpointDocWithID: (NSString*)checkpointID
+                      localLastSequence: (NSString*)localLastSequence
+                              isSibling: (BOOL)isSibling
+{
     LogTo(SyncPerf, @"%@ Getting remote checkpoint", self);
     [self asyncTaskStarted];
     CBLRemoteJSONRequest* request = 
@@ -751,12 +781,16 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
                   if (error && error.code != kCBLStatusNotFound) {
                       LogTo(Sync, @"%@: Error fetching last sequence: %@",
                             self, error.my_compactDescription);
+                      // Same as for our own checkpoint: a transient failure must not start a
+                      // replication from sequence 0, so surface the error and let the next
+                      // start retry.
                       self.error = error;
                   } else {
                       if (error.code == kCBLStatusNotFound)
                           [self maybeCreateRemoteDB];
                       response = $castIf(NSDictionary, response);
-                      self.remoteCheckpoint = response;
+                      if (!isSibling)
+                          self.remoteCheckpoint = response;
                       NSString* remoteLastSequence = response[@"lastSequence"];
 
                       if ($equal(remoteLastSequence, localLastSequence)) {
@@ -768,7 +802,8 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
                               // of the imported database after importing.
                               _lastSequence = [self getLastSequenceFromLocalCheckpointDocument];
                           }
-                          LogTo(Sync, @"%@: Replicating from lastSequence=%@", self, _lastSequence);
+                          LogTo(Sync, @"%@: Replicating from lastSequence=%@%@", self, _lastSequence,
+                                (isSibling ? @" (seeded from sibling checkpoint)" : @""));
                       } else {
                           LogTo(Sync, @"%@: lastSequence mismatch: I had %@, remote had %@ (response = %@)",
                                 self, localLastSequence, remoteLastSequence, response);

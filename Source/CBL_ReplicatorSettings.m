@@ -61,9 +61,26 @@ DefineLogDomain(SyncPerf);
 - (NSString*) remoteCheckpointDocIDForLocalUUID: (NSString*)localUUID {
     // Needs to be consistent with -hasSameSettingsAs: --
     // If a.remoteCheckpointID == b.remoteCheckpointID then [a hasSameSettingsAs: b]
+    return [self remoteCheckpointDocIDForLocalUUID: localUUID continuous: _continuous];
+}
+
+
+- (NSString*) siblingRemoteCheckpointDocIDForLocalUUID: (NSString*)localUUID {
+    return [self remoteCheckpointDocIDForLocalUUID: localUUID continuous: !_continuous];
+}
+
+
+- (BOOL) seedsCheckpointFromSibling {
+    return [_options[kCBLReplicatorOption_SeedCheckpointFromSibling] boolValue];
+}
+
+
+- (NSString*) remoteCheckpointDocIDForLocalUUID: (NSString*)localUUID
+                                     continuous: (BOOL)continuous
+{
     NSMutableDictionary* spec = $mdict({@"localUUID", localUUID},
                                        {@"push", @(_isPush)},
-                                       {@"continuous", (_continuous ? nil : $false)},
+                                       {@"continuous", (continuous ? nil : $false)},
                                        {@"filter", _filterName},
                                        {@"filterParams", _filterParameters},
                                      //{@"headers", _requestHeaders}, (removed; see #143)

@@ -90,6 +90,11 @@ echo "XCode has selected SDK: ${PLATFORM_NAME} with version: ${SDK_VERSION}, so 
 if [ "true" == ${ALREADYINVOKED:-false} ]
 then
 echo "RECURSION: I am NOT the root invocation, so I'm NOT going to recurse"
+# Single-platform builds (ALREADYINVOKED set by the caller) cannot lipo device and simulator
+# slices together on Apple Silicon, where both are arm64. Publish the current platform's library
+# under the universal dir so the dependent "Copy Library" phases still find it.
+mkdir -p "${UNIVERSAL_BUILD_DIR}"
+cp "${TARGET_BUILD_DIR}/${EXECUTABLE_NAME}" "${UNIVERSAL_BUILD_DIR}/${EXECUTABLE_NAME}"
 else
 # CRITICAL:
 # Prevent infinite recursion (Xcode sucks)

@@ -50,6 +50,14 @@ typedef CBL_Revision* (^RevisionBodyTransformationBlock)(CBL_Revision*);
 
 - (NSString*) remoteCheckpointDocIDForLocalUUID: (NSString*)localUUID;
 
+/** The checkpoint document ID a replicator with these same settings but the opposite
+    `continuous` value would use. */
+- (NSString*) siblingRemoteCheckpointDocIDForLocalUUID: (NSString*)localUUID;
+
+/** Whether a replicator without a checkpoint of its own may start from the sibling
+    replicator's checkpoint. (Derived from options key "seed_checkpoint_from_sibling".) */
+@property (readonly) BOOL seedsCheckpointFromSibling;
+
 /** Timeout interval for HTTP requests sent by this replicator.
     (Derived from options key "connection_timeout", in milliseconds.) */
 @property (readonly) NSTimeInterval requestTimeout;
@@ -93,6 +101,7 @@ typedef CBL_Revision* (^RevisionBodyTransformationBlock)(CBL_Revision*);
 #define kCBLReplicatorOption_PurgePushed @"purgePushed"     // Boolean; default is NO
 #define kCBLReplicatorOption_AllNew @"allNew"               // Boolean; default is NO
 #define kCBLReplicatorOption_Attachments @"attachments"     // Boolean; default is YES
+#define kCBLReplicatorOption_SeedCheckpointFromSibling @"seed_checkpoint_from_sibling" // Boolean; default is NO
 
 // Boolean; default is YES. Setting this option will have no effect and result to always 'trust' if
 // the kCBLReplicatorOption_Network option is also set.
