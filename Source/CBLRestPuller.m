@@ -306,6 +306,9 @@
         Warn(@"%@ failed to look up local revs; status=%d", self, status);
         inbox = nil;
     }
+    NSUInteger skippedTombstoneCount = 0;
+    if (_settings.skipsTombstonesOfUnknownDocuments)
+        skippedTombstoneCount = [self removeTombstonesOfUnknownDocuments: inbox];
     NSUInteger missingCount = inbox.count;
     if (missingCount < originalCount) {
         // Some of the revisions originally in the inbox aren't missing; treat those as processed:
@@ -341,12 +344,48 @@
         }
         rev.sequence = [_pendingSequences addValue: rev.remoteSequenceID];
     }
+    if (skippedTombstoneCount > 0) {
+        // Skipped tombstones may be the newest changes of this batch; make sure the checkpoint
+        // can still advance past them once the queued revisions are done.
+        SequenceNumber seq = [_pendingSequences addValue: lastInboxSequence];
+        [_pendingSequences removeSequence: seq];
+    }
     LogTo(Sync, @"%@ queued %u remote revisions from seq=%@ (%u in bulk, %u individually)",
           self, (unsigned)inbox.count, ((CBLPulledRevision*)inbox[0]).remoteSequenceID,
           numBulked, (unsigned)(inbox.count-numBulked));
     
     [self pullRemoteRevisions];
     [self pauseOrResume];
+}
+
+
+// A deletion of a document this database has never had (not even as a tombstone) carries no
+// information worth storing, so it is dropped from the inbox and counted as processed.
+// Returns the number of revisions removed.
+- (NSUInteger) removeTombstonesOfUnknownDocuments: (CBL_RevisionList*)inbox {
+    NSMutableSet* docIDsWithLiveRevisions = [NSMutableSet set];
+    for (CBLPulledRevision* rev in inbox.allRevisions) {
+        if (!rev.deleted)
+            [docIDsWithLiveRevisions addObject: rev.docID];
+    }
+    NSMutableArray* skipped = nil;
+    for (CBLPulledRevision* rev in inbox.allRevisions) {
+        if (!rev.deleted || [docIDsWithLiveRevisions containsObject: rev.docID])
+            continue;
+        CBLStatus status;
+        [_db.storage getDocumentWithID: rev.docID revisionID: nil withBody: NO status: &status];
+        if (status == kCBLStatusNotFound) {
+            if (!skipped)
+                skipped = [NSMutableArray array];
+            [skipped addObject: rev];
+        }
+    }
+    if (!skipped)
+        return 0;
+    for (CBLPulledRevision* rev in skipped)
+        [inbox removeRevIdenticalTo: rev];
+    LogTo(Sync, @"%@ skipping %u tombstones of unknown documents", self, (unsigned)skipped.count);
+    return skipped.count;
 }
 
 

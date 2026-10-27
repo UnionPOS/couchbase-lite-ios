@@ -301,6 +301,13 @@
                     [self removePending: rev];
                     continue;
                 }
+                if (rev.deleted && _settings.skipsTombstonesOfUnknownDocuments
+                        && [$castIf(NSArray, revResults[@"possible_ancestors"]) count] == 0) {
+                    // The remote has no revision of this document, so the deletion has nothing
+                    // to apply to (Sync Gateway rejects such a tombstone outright).
+                    [self removePending: rev];
+                    continue;
+                }
             }
 
             // Get the revision's properties:
