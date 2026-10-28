@@ -260,6 +260,7 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
     // Did client request a reset (i.e. starting over from first sequence?)
     if (_settings.options[kCBLReplicatorOption_Reset] != nil) {
         [db setLastSequence: nil withCheckpointID: self.remoteCheckpointDocID];
+        [db setPendingRemoteLastSequence: nil withCheckpointID: self.remoteCheckpointDocID];
     }
 
     // Note: This is actually a ref cycle, because the block has a (retained) reference to 'self',
@@ -829,17 +830,11 @@ static BOOL remoteSequenceIsAtLeastLocal(id remoteSequence, id localSequence) {
                           LogTo(Sync, @"%@: Replicating from lastSequence=%@%@", self, _lastSequence,
                                 (isSibling ? @" (seeded from sibling checkpoint)" : @""));
                       } else {
-                          // A remote checkpoint doc that exists but is ahead of the local one
-                          // means the same remote database saw an interrupted save; the local
-                          // sequence is where this database actually got to. A missing remote
-                          // doc means the remote database was reset, and a remote doc behind
-                          // the local one means the remote database was rolled back; either
-                          // way a full replication is required.
                           BOOL resumeFromLocal = _settings.resumesFromLocalCheckpoint
                                                  && !isSibling && localLastSequence != nil
-                                                 && response != nil
-                                                 && remoteSequenceIsAtLeastLocal(remoteLastSequence,
-                                                                                 localLastSequence);
+                                                 && [self canResumeFromLocalCheckpoint: localLastSequence
+                                                                  remoteLastSequence: remoteLastSequence
+                                                                        checkpointID: checkpointID];
                           if (resumeFromLocal)
                               _lastSequence = localLastSequence;
                           LogTo(Sync, @"%@: lastSequence mismatch: I had %@, remote had %@%@ (response = %@)",
@@ -857,6 +852,26 @@ static BOOL remoteSequenceIsAtLeastLocal(id remoteSequence, id localSequence) {
           }
      ];
     [request dontLog404];
+}
+
+
+// The local sequence is where this database actually got to, so it is safe to resume from
+// whenever the remote database is the same one and has not lost sequences. A remote checkpoint
+// ahead of the local one means a save whose PUT landed but whose completion never ran. A remote
+// checkpoint behind (or missing) is either an interrupted save, which -saveLastSequence marks
+// with the remote sequence it was about to replace, or a remote database that was rolled back
+// or reset, in which case there is no mark that matches and a full replication is required.
+- (BOOL) canResumeFromLocalCheckpoint: (NSString*)localLastSequence
+                   remoteLastSequence: (NSString*)remoteLastSequence
+                         checkpointID: (NSString*)checkpointID
+{
+    if (remoteLastSequence && remoteSequenceIsAtLeastLocal(remoteLastSequence, localLastSequence))
+        return YES;
+    NSString* pendingRemoteLastSequence = [_db pendingRemoteLastSequenceWithCheckpointID: checkpointID];
+    if (!pendingRemoteLastSequence)
+        return NO;
+    return $equal(pendingRemoteLastSequence,
+                  remoteLastSequence.description ?: kCBLPendingRemoteCheckpointMissing);
 }
 
 
@@ -936,8 +951,13 @@ static BOOL remoteSequenceIsAtLeastLocal(id remoteSequence, id localSequence) {
     if (_settings.resumesFromLocalCheckpoint) {
         // Record the sequence locally first so that a process kill during the PUT leaves the
         // local checkpoint at the sequence actually processed, which is what the next launch
-        // resumes from on mismatch.
-        [_db setLastSequence: [lastSequence description] withCheckpointID: checkpointID];
+        // resumes from on mismatch. The remote sequence being replaced is kept alongside it so
+        // that launch can tell an interrupted save from a rolled-back remote database.
+        CBLDatabase* strongDb = _db;
+        [strongDb setLastSequence: [lastSequence description] withCheckpointID: checkpointID];
+        [strongDb setPendingRemoteLastSequence: [_remoteCheckpoint[@"lastSequence"] description]
+                                                  ?: kCBLPendingRemoteCheckpointMissing
+                               withCheckpointID: checkpointID];
     }
     CBLRemoteRequest* request = [_remoteSession startRequest: @"PUT"
                           path: [@"_local/" stringByAppendingString: checkpointID]
@@ -972,6 +992,7 @@ static BOOL remoteSequenceIsAtLeastLocal(id remoteSequence, id localSequence) {
                 self.remoteCheckpoint = body;
                 [db setLastSequence: [lastSequence description]
                    withCheckpointID: checkpointID];
+                [db setPendingRemoteLastSequence: nil withCheckpointID: checkpointID];
                 LogTo(Sync, @"%@ saved remote checkpoint '%@' (_rev=%@)",
                       self, lastSequence, rev);
             }

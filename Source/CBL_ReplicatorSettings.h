@@ -58,10 +58,11 @@ typedef CBL_Revision* (^RevisionBodyTransformationBlock)(CBL_Revision*);
     replicator's checkpoint. (Derived from options key "seed_checkpoint_from_sibling".) */
 @property (readonly) BOOL seedsCheckpointFromSibling;
 
-/** Whether a replicator whose remote checkpoint document exists but is ahead of the local
-    checkpoint resumes from the local sequence instead of replicating from scratch, and saves
-    the local checkpoint before updating the remote one. A remote checkpoint behind the local
-    one still replicates from scratch.
+/** Whether a replicator whose remote checkpoint disagrees with the local one resumes from the
+    local sequence instead of replicating from scratch, and saves the local checkpoint before
+    updating the remote one. It resumes when the remote checkpoint is ahead of the local one, or
+    when it is behind or missing because the previous save's PUT was interrupted; a remote
+    database that was rolled back or reset still replicates from scratch.
     (Derived from options key "resume_from_local_checkpoint".) */
 @property (readonly) BOOL resumesFromLocalCheckpoint;
 

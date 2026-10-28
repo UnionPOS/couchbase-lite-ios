@@ -1117,9 +1117,50 @@ static UInt16 sSeedListenerPort = 60500;
 }
 
 
-#define kRolledBackRemoteLastSequence @"20"
+// A remote checkpoint behind the local one is what a save interrupted during its PUT leaves
+// behind (the local checkpoint is written first). The pending-remote mark written alongside it
+// names the remote sequence that PUT was replacing; when the remote still holds that sequence
+// the save was merely interrupted and the replicator resumes from the local checkpoint.
+#define kStaleRemoteLastSequence @"20"
 
-- (void) test30_ReplicatesFromScratchWhenRemoteCheckpointIsBehindLocal {
+- (void) test30_ResumesWhenRemoteCheckpointIsBehindLocalAfterInterruptedSave {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+    NSDictionary* resumeOptions = @{kCBLReplicatorOption_ResumeFromLocalCheckpoint: @YES};
+
+    id<CBL_Replicator> firstRepl = [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    NSString* checkpointID = firstRepl.remoteCheckpointDocID;
+    AssertNil([db pendingRemoteLastSequenceWithCheckpointID: checkpointID]);
+    [self changeSeedListenerDB: listenerDB];
+    Assert([db setLastSequence: kRewoundLocalLastSequence withCheckpointID: checkpointID]);
+    Assert([db setPendingRemoteLastSequence: kStaleRemoteLastSequence withCheckpointID: checkpointID]);
+    Assert([listenerDB putLocalDocument: @{@"lastSequence": kStaleRemoteLastSequence}
+                                 withID: checkpointID
+                                  error: NULL]);
+
+    NSDictionary* mismatch = [self captureCheckpointMismatchWhileRunning: ^id<CBL_Replicator> {
+        return [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    }];
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey],
+                kRewoundLocalLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey],
+                kStaleRemoteLastSequence);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchResumedFromLocalKey], @YES);
+    AssertEq([mismatch[@"changesTotal"] unsignedIntegerValue], (NSUInteger)kChangesAfterRewoundCheckpoint);
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual(mismatch[@"lastSequence"], listenerLastSequence);
+    AssertEqual([db lastSequenceWithCheckpointID: checkpointID], listenerLastSequence);
+    AssertNil([db pendingRemoteLastSequenceWithCheckpointID: checkpointID]);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+- (void) test31_ReplicatesFromScratchWhenRemoteCheckpointIsRolledBack {
     if (_newReplicator)
         return;
     CBLDatabase* listenerDB;
@@ -1131,7 +1172,7 @@ static UInt16 sSeedListenerPort = 60500;
     NSString* checkpointID = firstRepl.remoteCheckpointDocID;
     [self changeSeedListenerDB: listenerDB];
     Assert([db setLastSequence: kRewoundLocalLastSequence withCheckpointID: checkpointID]);
-    Assert([listenerDB putLocalDocument: @{@"lastSequence": kRolledBackRemoteLastSequence}
+    Assert([listenerDB putLocalDocument: @{@"lastSequence": kStaleRemoteLastSequence}
                                  withID: checkpointID
                                   error: NULL]);
 
@@ -1141,12 +1182,42 @@ static UInt16 sSeedListenerPort = 60500;
     AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey],
                 kRewoundLocalLastSequence);
     AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey],
-                kRolledBackRemoteLastSequence);
+                kStaleRemoteLastSequence);
     AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchResumedFromLocalKey], @NO);
     AssertEq([mismatch[@"changesTotal"] unsignedIntegerValue],
              (NSUInteger)listenerDB.documentCount + kSeedDeletedDocCount + 1);
     NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
     AssertEqual(mismatch[@"lastSequence"], listenerLastSequence);
+    [self verifyPostOneShotChangesArrived];
+
+    [listener stop];
+}
+
+
+- (void) test32_ResumesWhenRemoteCheckpointIsMissingAfterInterruptedFirstSave {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+    NSDictionary* resumeOptions = @{kCBLReplicatorOption_ResumeFromLocalCheckpoint: @YES};
+
+    id<CBL_Replicator> firstRepl = [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    NSString* checkpointID = firstRepl.remoteCheckpointDocID;
+    NSString* localLastSequence = [db lastSequenceWithCheckpointID: checkpointID];
+    NSUInteger changesAfterFirstRun = [self changeSeedListenerDB: listenerDB];
+    Assert([db setPendingRemoteLastSequence: kCBLPendingRemoteCheckpointMissing
+                           withCheckpointID: checkpointID]);
+    Assert([listenerDB deleteLocalDocumentWithID: checkpointID error: NULL]);
+
+    NSDictionary* mismatch = [self captureCheckpointMismatchWhileRunning: ^id<CBL_Replicator> {
+        return [self runContinuousPullFrom: remoteURL options: resumeOptions];
+    }];
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey], localLastSequence);
+    AssertNil(mismatch[CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey]);
+    AssertEqual(mismatch[CBL_ReplicatorCheckpointMismatchResumedFromLocalKey], @YES);
+    AssertEq([mismatch[@"changesTotal"] unsignedIntegerValue], changesAfterFirstRun);
+    AssertNil([db pendingRemoteLastSequenceWithCheckpointID: checkpointID]);
     [self verifyPostOneShotChangesArrived];
 
     [listener stop];

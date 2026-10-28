@@ -48,6 +48,16 @@
 - (NSString*) lastSequenceWithCheckpointID: (NSString*)checkpointID;
 - (BOOL) setLastSequence: (NSString*)lastSequence withCheckpointID: (NSString*)checkpointID;
 
+/** The remote checkpoint's lastSequence at the moment the local checkpoint was written ahead of
+    the remote PUT, or kCBLPendingRemoteCheckpointMissing when there was no remote checkpoint doc.
+    Set while that PUT is in flight and cleared when it succeeds, so a value found at startup
+    identifies an interrupted save. */
+- (NSString*) pendingRemoteLastSequenceWithCheckpointID: (NSString*)checkpointID;
+- (BOOL) setPendingRemoteLastSequence: (NSString*)remoteLastSequence
+                     withCheckpointID: (NSString*)checkpointID;
+
+#define kCBLPendingRemoteCheckpointMissing @"missing"
+
 /** Get the current last sequence for a given replicator settings */
 - (NSString*) lastSequenceForReplicator: (CBL_ReplicatorSettings*)settings;
 
