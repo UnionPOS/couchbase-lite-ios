@@ -58,6 +58,12 @@ typedef CBL_Revision* (^RevisionBodyTransformationBlock)(CBL_Revision*);
     replicator's checkpoint. (Derived from options key "seed_checkpoint_from_sibling".) */
 @property (readonly) BOOL seedsCheckpointFromSibling;
 
+/** Whether tombstones of documents the receiving side has never had are left out: a puller
+    does not fetch a remote deletion of a document that does not exist locally, and a pusher
+    does not upload a local deletion of a document the remote has no revision of.
+    (Derived from options key "skip_tombstones_of_unknown_documents".) */
+@property (readonly) BOOL skipsTombstonesOfUnknownDocuments;
+
 /** Whether a replicator whose remote checkpoint disagrees with the local one resumes from the
     local sequence instead of replicating from scratch, and saves the local checkpoint before
     updating the remote one. It resumes when the remote checkpoint is ahead of the local one, or
@@ -110,6 +116,7 @@ typedef CBL_Revision* (^RevisionBodyTransformationBlock)(CBL_Revision*);
 #define kCBLReplicatorOption_AllNew @"allNew"               // Boolean; default is NO
 #define kCBLReplicatorOption_Attachments @"attachments"     // Boolean; default is YES
 #define kCBLReplicatorOption_SeedCheckpointFromSibling @"seed_checkpoint_from_sibling" // Boolean; default is NO
+#define kCBLReplicatorOption_SkipTombstonesOfUnknownDocuments @"skip_tombstones_of_unknown_documents" // Boolean; default is NO
 #define kCBLReplicatorOption_ResumeFromLocalCheckpoint @"resume_from_local_checkpoint" // Boolean; default is NO
 
 // Boolean; default is YES. Setting this option will have no effect and result to always 'trust' if

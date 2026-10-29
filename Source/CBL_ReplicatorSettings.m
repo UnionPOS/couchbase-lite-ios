@@ -75,6 +75,11 @@ DefineLogDomain(SyncPerf);
 }
 
 
+- (BOOL) skipsTombstonesOfUnknownDocuments {
+    return [_options[kCBLReplicatorOption_SkipTombstonesOfUnknownDocuments] boolValue];
+}
+
+
 - (BOOL) resumesFromLocalCheckpoint {
     return [_options[kCBLReplicatorOption_ResumeFromLocalCheckpoint] boolValue];
 }

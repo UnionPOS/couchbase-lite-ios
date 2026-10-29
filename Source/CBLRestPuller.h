@@ -23,6 +23,7 @@
     BOOL _canBulkGet;                   // Does the server support _bulk_get requests?
     BOOL _caughtUp;                     // Have I received all current _changes entries?
     CBLSequenceMap* _pendingSequences;  // Received but not yet copied into local DB
+    NSCountedSet<NSString*>* _docIDsBeingPulled; // docIDs of the revs in _pendingSequences (skip-tombstones option only)
     NSMutableArray<CBLPulledRevision*>* _revsToPull;        // Queue of revs to download
     NSMutableArray<CBLPulledRevision*>* _deletedRevsToPull; // Separate lower-priority of deleted revs
     NSMutableArray<CBLPulledRevision*>* _bulkRevsToPull;    // revs that can be fetched in bulk

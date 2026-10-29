@@ -88,6 +88,8 @@
             AssertEqual(_pendingSequences.checkpointedValue, _lastSequence);
         }
     }
+    if (!_docIDsBeingPulled && _settings.skipsTombstonesOfUnknownDocuments)
+        _docIDsBeingPulled = [NSCountedSet set];
     
     _caughtUp = NO;
     [self asyncTaskStarted];   // task: waiting to catch up
@@ -306,6 +308,9 @@
         Warn(@"%@ failed to look up local revs; status=%d", self, status);
         inbox = nil;
     }
+    NSUInteger skippedTombstoneCount = 0;
+    if (_settings.skipsTombstonesOfUnknownDocuments)
+        skippedTombstoneCount = [self removeTombstonesOfUnknownDocuments: inbox];
     NSUInteger missingCount = inbox.count;
     if (missingCount < originalCount) {
         // Some of the revisions originally in the inbox aren't missing; treat those as processed:
@@ -340,6 +345,13 @@
             [self queueRemoteRevision: rev];
         }
         rev.sequence = [_pendingSequences addValue: rev.remoteSequenceID];
+        [_docIDsBeingPulled addObject: rev.docID];
+    }
+    if (skippedTombstoneCount > 0) {
+        // Skipped tombstones may be the newest changes of this batch; make sure the checkpoint
+        // can still advance past them once the queued revisions are done.
+        SequenceNumber seq = [_pendingSequences addValue: lastInboxSequence];
+        [_pendingSequences removeSequence: seq];
     }
     LogTo(Sync, @"%@ queued %u remote revisions from seq=%@ (%u in bulk, %u individually)",
           self, (unsigned)inbox.count, ((CBLPulledRevision*)inbox[0]).remoteSequenceID,
@@ -347,6 +359,40 @@
     
     [self pullRemoteRevisions];
     [self pauseOrResume];
+}
+
+
+// A deletion of a document this database has never had (not even as a tombstone) carries no
+// information worth storing, so it is dropped from the inbox and counted as processed.
+// A document is known when it is stored locally, when a live revision of it is in this inbox, or
+// when a revision of it heard from an earlier batch is still being downloaded or waiting to be
+// inserted; a tombstone of such a document must still be applied once that revision lands.
+// Returns the number of revisions removed.
+- (NSUInteger) removeTombstonesOfUnknownDocuments: (CBL_RevisionList*)inbox {
+    NSMutableSet* docIDsWithLiveRevisions = [NSMutableSet set];
+    for (CBLPulledRevision* rev in inbox.allRevisions) {
+        if (!rev.deleted)
+            [docIDsWithLiveRevisions addObject: rev.docID];
+    }
+    NSMutableArray* skipped = nil;
+    for (CBLPulledRevision* rev in inbox.allRevisions) {
+        if (!rev.deleted || [docIDsWithLiveRevisions containsObject: rev.docID]
+                || [_docIDsBeingPulled containsObject: rev.docID])
+            continue;
+        CBLStatus status;
+        [_db.storage getDocumentWithID: rev.docID revisionID: nil withBody: NO status: &status];
+        if (status == kCBLStatusNotFound) {
+            if (!skipped)
+                skipped = [NSMutableArray array];
+            [skipped addObject: rev];
+        }
+    }
+    if (!skipped)
+        return 0;
+    for (CBLPulledRevision* rev in skipped)
+        [inbox removeRevIdenticalTo: rev];
+    LogTo(Sync, @"%@ skipping %u tombstones of unknown documents", self, (unsigned)skipped.count);
+    return skipped.count;
 }
 
 
@@ -648,6 +694,7 @@
     else {
         LogVerbose(Sync, @"Giving up on %@: %@", rev, error.my_compactDescription);
         [_pendingSequences removeSequence: rev.sequence];
+        [_docIDsBeingPulled removeObject: rev.docID];
         [self pauseOrResume];
     }
     self.changesProcessed++;
@@ -672,6 +719,7 @@
         if (xformed == nil) {
             LogTo(Sync, @"%@: Transformer rejected revision %@", self, rev);
             [_pendingSequences removeSequence: rev.sequence];
+            [_docIDsBeingPulled removeObject: rev.docID];
             self.lastSequence = _pendingSequences.checkpointedValue;
             [self pauseOrResume];
             return;
@@ -741,6 +789,7 @@
                 
                 // Mark this revision's fake sequence as processed:
                 [_pendingSequences removeSequence: fakeSequence];
+                [_docIDsBeingPulled removeObject: rev.docID];
             }
         }
         
