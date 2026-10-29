@@ -99,6 +99,12 @@ FOUNDATION_EXTERN id CBLTextKey(NSString* text);
 /** The last sequence number indexed so far. */
 @property (readonly) SInt64 lastSequenceIndexed;
 
+/** Union extension. When YES, SQLite-backed views remember the sequence at which their index last
+    gained or lost rows, so a CBLLiveQuery whose view is unchanged skips re-running the query.
+    Off by default, in which case every database change re-runs every live query as in upstream
+    Couchbase Lite 1.4. Takes effect for index updates performed after it is set. */
+@property (class, nonatomic) BOOL indexChangeTrackingEnabled;
+
 /** Total number of rows in the view. The view's index will be updated if needed before returning
     the totalRows value. */
 @property (readonly) NSUInteger totalRows;

@@ -29,6 +29,17 @@
 #import "FMResultSet.h"
 
 
+static BOOL sTracksIndexChanges = NO;
+
+BOOL CBL_SQLiteViewStorageTracksIndexChanges(void) {
+    return sTracksIndexChanges;
+}
+
+void CBL_SQLiteViewStorageSetTracksIndexChanges(BOOL tracks) {
+    sTracksIndexChanges = tracks;
+}
+
+
 @implementation CBL_SQLiteViewStorage
 {
     __weak CBL_SQLiteStorage* _dbStorage;
@@ -37,6 +48,9 @@
     NSString* _mapTableName;
     BOOL _initializedFullTextSchema, _initializedRTreeSchema;
     NSString* _emitSQL;
+    // Only this CBL_SQLiteViewStorage instance knows when it changed the index, so the recorded
+    // value is trusted only while lastSequenceIndexed is still the one it was recorded for.
+    SequenceNumber _lastSequenceChangedAt, _lastSequenceChangedAtIndexedSequence;
 }
 
 @synthesize name=_name, delegate=_delegate;
@@ -52,6 +66,8 @@
         _dbStorage = dbStorage;
         _viewID = -1;  // means 'unknown'
         _collation = kCBLViewCollationUnicode;
+        _lastSequenceChangedAt = -1;
+        _lastSequenceChangedAtIndexedSequence = -1;
 
         if (!create && self.viewID <= 0)
             return nil;
@@ -250,8 +266,24 @@
 
 
 - (SequenceNumber) lastSequenceChangedAt {
-    return self.lastSequenceIndexed;
-    //FIX: Should store this properly; it helps optimize CBLLiveQuery
+    SequenceNumber lastSequenceIndexed = self.lastSequenceIndexed;
+    if (sTracksIndexChanges && _lastSequenceChangedAt >= 0
+            && _lastSequenceChangedAtIndexedSequence == lastSequenceIndexed)
+        return _lastSequenceChangedAt;
+    return lastSequenceIndexed;
+}
+
+
+- (void) recordIndexUpdatedFromSequence: (SequenceNumber)previousSequence
+                             toSequence: (SequenceNumber)sequence
+                            changedRows: (BOOL)changedRows
+{
+    if (changedRows || previousSequence <= 0) {
+        _lastSequenceChangedAt = sequence;
+    } else if (_lastSequenceChangedAt < 0 || _lastSequenceChangedAtIndexedSequence != previousSequence) {
+        _lastSequenceChangedAt = previousSequence;
+    }
+    _lastSequenceChangedAtIndexedSequence = sequence;
 }
 
 
@@ -262,6 +294,8 @@
     LogTo(View, @"Checking indexes of (%@) for %@", viewNames(inputViews), _name);
     CBL_SQLiteStorage* dbStorage = _dbStorage;
     CBL_FMDatabase* fmdb = dbStorage.fmdb;
+    NSMapTable* indexUpdates = [NSMapTable strongToStrongObjectsMapTable];
+    __block SequenceNumber indexedToSequence = -1;
 
     CBLStatus status = [dbStorage inTransaction: ^CBLStatus {
         // If the view the update is for doesn't need any update, don't do anything:
@@ -275,6 +309,7 @@
         SequenceNumber minLastSequence = dbMaxSequence;
         SequenceNumber viewLastSequence[inputViews.count];
         unsigned deletedCount = 0;
+        NSMutableSet* viewsWithChangedRows = [NSMutableSet set];
         int i = 0;
         NSMutableSet* docTypes = [NSMutableSet set];
         NSMutableDictionary* viewDocTypes = nil;
@@ -341,6 +376,8 @@
                 // Update #deleted rows
                 int changes = fmdb.changes;
                 deletedCount += changes;
+                if (changes > 0)
+                    [viewsWithChangedRows addObject: @(viewID)];
                 
                 // Only count these deletes as changes if this isn't a view reset to 0
                 if (last != 0) {
@@ -371,6 +408,7 @@
             else {
                 viewTotalRows[@(curView.viewID)] = @([viewTotalRows[@(curView.viewID)] intValue] + 1);
                 insertedCount++;
+                [viewsWithChangedRows addObject: @(curView.viewID)];
             }
         };
 
@@ -442,6 +480,8 @@
                             deletedCount += changes;
                             viewTotalRows[@(view.viewID)] =
                                 @([viewTotalRows[@(view.viewID)] intValue] - changes);
+                            if (changes > 0)
+                                [viewsWithChangedRows addObject: @(view.viewID)];
                         }
                         if (deleted || [oldRevID compare: revID] > 0) {
                             // It still 'wins' the conflict, so it's the one that
@@ -514,6 +554,7 @@
         [r close];
         
         // Finally, record the last revision sequence number that was indexed and update #rows:
+        i = 0;
         for (CBL_SQLiteViewStorage* view in views) {
             [view finishCreatingIndex];
             int newTotalRows = [viewTotalRows[@(view.viewID)] intValue];
@@ -521,12 +562,25 @@
             if (![fmdb executeUpdate: @"UPDATE views SET lastSequence=?, total_docs=? WHERE view_id=?",
                                        @(dbMaxSequence), @(newTotalRows), @(view.viewID)])
                 return dbStorage.lastDbError;
+            [indexUpdates setObject: @{@"previousSequence": @(viewLastSequence[i++]),
+                                       @"changedRows": @([viewsWithChangedRows containsObject: @(view.viewID)])}
+                             forKey: view];
         }
         
+        indexedToSequence = dbMaxSequence;
         LogTo(View, @"...Finished re-indexing (%@) to #%lld (deleted %u, added %u)",
               viewNames(views), dbMaxSequence, deletedCount, insertedCount);
         return kCBLStatusOK;
     }];
+    
+    if (status == kCBLStatusOK) {
+        for (CBL_SQLiteViewStorage* view in indexUpdates) {
+            NSDictionary* update = [indexUpdates objectForKey: view];
+            [view recordIndexUpdatedFromSequence: [update[@"previousSequence"] longLongValue]
+                                      toSequence: indexedToSequence
+                                     changedRows: [update[@"changedRows"] boolValue]];
+        }
+    }
     
     if (status >= kCBLStatusBadRequest)
         Warn(@"CouchbaseLite: Failed to rebuild views (%@): %d", viewNames(inputViews), status);

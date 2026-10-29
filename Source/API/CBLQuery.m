@@ -428,14 +428,19 @@ DefineLogDomain(Query);
         _lastError = error;
         if (error) {
             Warn(@"%@: Error updating rows: %@", self, error.my_compactDescription);
-        } else {
+        } else if (rows) {
             _lastSequence = (SequenceNumber)rows.sequenceNumber;
-            if(rows && ![rows isEqual: _rows]) {
+            if (![rows isEqual: _rows]) {
                 LogTo(Query, @"%@: ...Rows changed! (now %lu)", self, (unsigned long)rows.count);
                 self.rows = rows;   // Triggers KVO notification
             } else {
                 LogVerbose(Query, @"%@: ...Rows NOT changed; not updating .rows", self);
             }
+        } else {
+            // Not modified: the view has not changed since the current rows were generated, so
+            // they stay current up to the database sequence this update was started for.
+            _lastSequence = lastSequence;
+            LogVerbose(Query, @"%@: ...View unchanged; not updating .rows", self);
         }
         if (_updateAgain)
             [self update];

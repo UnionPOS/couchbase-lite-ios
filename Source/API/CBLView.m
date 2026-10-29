@@ -15,6 +15,7 @@
 
 #import "CouchbaseLitePrivate.h"
 #import "CBL_ViewStorage.h"
+#import "CBL_SQLiteViewStorage.h"
 #import "CBLView+Internal.h"
 #import "CBLView+REST.h"
 #import "CBLSpecialKey.h"
@@ -93,6 +94,15 @@ NSString* const kCBLViewChangeNotification = @"CBLViewChange";
 
 
 @synthesize name=_name, storage=_storage, collation=_collation, isDesignDoc=_isDesignDoc;
+
+
++ (BOOL) indexChangeTrackingEnabled {
+    return CBL_SQLiteViewStorageTracksIndexChanges();
+}
+
++ (void) setIndexChangeTrackingEnabled: (BOOL)enabled {
+    CBL_SQLiteViewStorageSetTracksIndexChanges(enabled);
+}
 
 
 - (NSString*) description {

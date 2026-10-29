@@ -17,6 +17,14 @@
 @end
 
 
+@interface CBLDatabase (ViewsPrivate)
+- (CBLQueryEnumerator*) queryViewNamed: (NSString*)viewName
+                               options: (CBLQueryOptions*)options
+                        ifChangedSince: (SequenceNumber)ifChangedSince
+                                status: (CBLStatus*)outStatus;
+@end
+
+
 @interface TestLiveQueryObserver : NSObject
 @property (copy) NSDictionary*change;
 @property unsigned changeCount;
@@ -1355,6 +1363,176 @@ static NSDictionary* mkGeoRect(double x0, double y0, double x1, double y1) {
     rows = [query run: NULL];
     AssertEq(rows.count, 1u);
     AssertEqual([rows rowAtIndex:0].documentID, @"itemA");
+}
+
+
+#pragma mark - INDEX CHANGE TRACKING:
+
+
+static NSString* const kTrackedDocumentType = @"tracked";
+static NSString* const kUntrackedDocumentType = @"untracked";
+
+
+- (CBLView*) createTrackedTypeViewNamed: (NSString*)name inDatabase: (CBLDatabase*)indb {
+    CBLView* view = [indb viewNamed: name];
+    [view setMapBlock: MAPBLOCK({
+        if ([doc[@"type"] isEqualToString: kTrackedDocumentType])
+            emit(doc[@"name"], @1);
+    }) version: @"1"];
+    return view;
+}
+
+
+- (void) assertView: (CBLView*)view isUnchangedSince: (SequenceNumber)sequence {
+    AssertEq(view.lastSequenceIndexed, db.lastSequenceNumber);
+    AssertEq(view.lastSequenceChangedAt, sequence);
+    CBLStatus status;
+    CBLQueryEnumerator* e = [db queryViewNamed: view.name options: [CBLQueryOptions new]
+                                ifChangedSince: sequence status: &status];
+    AssertNil(e);
+    AssertEq(status, kCBLStatusNotModified);
+}
+
+
+- (void) assertView: (CBLView*)view changedAfter: (SequenceNumber)sequence {
+    AssertEq(view.lastSequenceIndexed, db.lastSequenceNumber);
+    Assert(view.lastSequenceChangedAt > sequence);
+    AssertEq(view.lastSequenceChangedAt, view.lastSequenceIndexed);
+    CBLStatus status;
+    CBLQueryEnumerator* e = [db queryViewNamed: view.name options: [CBLQueryOptions new]
+                                ifChangedSince: sequence status: &status];
+    Assert(e != nil);
+}
+
+
+- (void) test26_IndexChangeTracking_UnchangedViewReportsNotModified {
+    if (!self.isSQLiteDB)
+        return;
+    CBLView.indexChangeTrackingEnabled = YES;
+    @try {
+        CBLView* view = [self createTrackedTypeViewNamed: @"tracked" inDatabase: db];
+        CBLDocument* tracked = [self createDocumentWithProperties: @{@"type": kTrackedDocumentType,
+                                                                     @"name": @"first"}];
+        [view updateIndex];
+        SequenceNumber indexedAt = view.lastSequenceIndexed;
+        AssertEq(view.lastSequenceChangedAt, indexedAt);
+
+        for (int i = 0; i < 3; i++)
+            [self createDocumentWithProperties: @{@"type": kUntrackedDocumentType, @"name": @"other"}];
+        [view updateIndex];
+        [self assertView: view isUnchangedSince: indexedAt];
+
+        [self createDocumentWithProperties: @{@"type": kTrackedDocumentType, @"name": @"second"}];
+        [view updateIndex];
+        [self assertView: view changedAfter: indexedAt];
+        indexedAt = view.lastSequenceIndexed;
+
+        Assert([tracked update: ^BOOL(CBLUnsavedRevision* rev) {
+            rev[@"name"] = @"renamed";
+            return YES;
+        } error: NULL]);
+        [view updateIndex];
+        [self assertView: view changedAfter: indexedAt];
+        indexedAt = view.lastSequenceIndexed;
+
+        Assert([tracked deleteDocument: NULL]);
+        [view updateIndex];
+        [self assertView: view changedAfter: indexedAt];
+        indexedAt = view.lastSequenceIndexed;
+
+        [self createDocumentWithProperties: @{@"type": kUntrackedDocumentType, @"name": @"other"}];
+        [view updateIndex];
+        [self assertView: view isUnchangedSince: indexedAt];
+    } @finally {
+        CBLView.indexChangeTrackingEnabled = NO;
+    }
+}
+
+
+- (void) test27_IndexChangeTracking_DisabledByDefault {
+    if (!self.isSQLiteDB)
+        return;
+    Assert(!CBLView.indexChangeTrackingEnabled);
+    CBLView* view = [self createTrackedTypeViewNamed: @"tracked" inDatabase: db];
+    [self createDocumentWithProperties: @{@"type": kTrackedDocumentType, @"name": @"first"}];
+    [view updateIndex];
+    SequenceNumber indexedAt = view.lastSequenceIndexed;
+
+    [self createDocumentWithProperties: @{@"type": kUntrackedDocumentType, @"name": @"other"}];
+    [view updateIndex];
+    [self assertView: view changedAfter: indexedAt];
+}
+
+
+- (void) test28_IndexChangeTracking_FallsBackWhenAnotherInstanceUpdatesIndex {
+    if (!self.isSQLiteDB)
+        return;
+    CBLView.indexChangeTrackingEnabled = YES;
+    CBLManager* otherManager = [dbmgr copy];
+    @try {
+        CBLView* view = [self createTrackedTypeViewNamed: @"tracked" inDatabase: db];
+        [self createDocumentWithProperties: @{@"type": kTrackedDocumentType, @"name": @"first"}];
+        [view updateIndex];
+        SequenceNumber indexedAt = view.lastSequenceIndexed;
+
+        [self createDocumentWithProperties: @{@"type": kUntrackedDocumentType, @"name": @"other"}];
+        CBLDatabase* otherDB = [otherManager existingDatabaseNamed: db.name error: NULL];
+        Assert(otherDB);
+        CBLView* otherView = [self createTrackedTypeViewNamed: @"tracked" inDatabase: otherDB];
+        [otherView updateIndex];
+        AssertEq(otherView.lastSequenceIndexed, db.lastSequenceNumber);
+        AssertEq(otherView.lastSequenceChangedAt, indexedAt);
+
+        // This instance did not perform the update, so it cannot know the index is unchanged:
+        AssertEq(view.lastSequenceIndexed, db.lastSequenceNumber);
+        AssertEq(view.lastSequenceChangedAt, view.lastSequenceIndexed);
+        Assert(view.lastSequenceChangedAt > indexedAt);
+    } @finally {
+        [otherManager close];
+        CBLView.indexChangeTrackingEnabled = NO;
+    }
+}
+
+
+- (void) test29_LiveQuery_IndexChangeTracking {
+    if (!self.isSQLiteDB)
+        return;
+    CBLView.indexChangeTrackingEnabled = YES;
+    CBLLiveQuery* query = nil;
+    @try {
+        CBLView* view = [self createTrackedTypeViewNamed: @"tracked" inDatabase: db];
+        [self createDocumentWithProperties: @{@"type": kTrackedDocumentType, @"name": @"first"}];
+
+        query = [[view createQuery] asLiveQuery];
+        TestLiveQueryObserver* observer = [TestLiveQueryObserver new];
+        [query addObserver: observer forKeyPath: @"rows" options: 0 context: NULL];
+        Assert([query waitForRows]);
+        AssertEq(query.rows.count, 1u);
+        AssertEq(observer.changeCount, 1u);
+
+        for (int i = 0; i < 3; i++)
+            [self createDocumentWithProperties: @{@"type": kUntrackedDocumentType, @"name": @"other"}];
+        [self runLiveQueryUpdatesFor: 1.0];
+        AssertEq(query.rows.count, 1u);
+        AssertEq(observer.changeCount, 1u);
+
+        [self createDocumentWithProperties: @{@"type": kTrackedDocumentType, @"name": @"second"}];
+        [self runLiveQueryUpdatesFor: 1.0];
+        AssertEq(query.rows.count, 2u);
+        AssertEq(observer.changeCount, 2u);
+
+        [query removeObserver: observer forKeyPath: @"rows"];
+    } @finally {
+        [query stop];
+        CBLView.indexChangeTrackingEnabled = NO;
+    }
+}
+
+
+- (void) runLiveQueryUpdatesFor: (NSTimeInterval)interval {
+    NSDate* until = [NSDate dateWithTimeIntervalSinceNow: interval];
+    while (until.timeIntervalSinceNow > 0)
+        [[NSRunLoop currentRunLoop] runMode: NSDefaultRunLoopMode beforeDate: until];
 }
 
 
