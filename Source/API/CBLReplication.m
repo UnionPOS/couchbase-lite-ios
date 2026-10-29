@@ -34,12 +34,20 @@ typedef void (^PendingAction)(id<CBL_Replicator>);
 
 
 NSString* const kCBLReplicationChangeNotification = @"CBLReplicationChange";
+NSString* const kCBLReplicationCheckpointMismatchNotification = @"CBLReplicationCheckpointMismatch";
+NSString* const kCBLReplicationCheckpointMismatchLocalLastSequenceKey = @"localLastSequence";
+NSString* const kCBLReplicationCheckpointMismatchRemoteLastSequenceKey = @"remoteLastSequence";
+NSString* const kCBLReplicationCheckpointMismatchResumedFromLocalKey = @"resumedFromLocal";
 NSString* const kCBLProgressErrorKey = kCBLProgressError;
 
 
 // Declared in CBL_Replicator.h
 NSString* CBL_ReplicatorProgressChangedNotification = @"CBL_ReplicatorProgressChanged";
 NSString* CBL_ReplicatorStoppedNotification = @"CBL_ReplicatorStopped";
+NSString* CBL_ReplicatorCheckpointMismatchNotification = @"CBL_ReplicatorCheckpointMismatch";
+NSString* CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey = @"localLastSequence";
+NSString* CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey = @"remoteLastSequence";
+NSString* CBL_ReplicatorCheckpointMismatchResumedFromLocalKey = @"resumedFromLocal";
 
 
 #define kByChannelFilterName @"sync_gateway/bychannel"
@@ -639,7 +647,29 @@ NSString* CBL_ReplicatorStoppedNotification = @"CBL_ReplicatorStopped";
                                                  selector: @selector(bg_replicationProgressChanged:)
                                                      name: CBL_ReplicatorProgressChangedNotification
                                                    object: _bg_replicator];
+        [[NSNotificationCenter defaultCenter] addObserver: self
+                                                 selector: @selector(bg_replicationCheckpointMismatch:)
+                                                     name: CBL_ReplicatorCheckpointMismatchNotification
+                                                   object: _bg_replicator];
     }
+}
+
+
+// CAREFUL: This is called on the server's background thread!
+- (void) bg_replicationCheckpointMismatch: (NSNotification*)n {
+    if (n.object != _bg_replicator)
+        return;
+    NSDictionary* userInfo = n.userInfo;
+    __weak CBLReplication *weakSelf = self;
+    [_database.manager doAsync: ^{
+        CBLReplication *strongSelf = weakSelf;
+        if (!strongSelf)
+            return;
+        [[NSNotificationCenter defaultCenter]
+                postNotificationName: kCBLReplicationCheckpointMismatchNotification
+                              object: strongSelf
+                            userInfo: userInfo];
+    }];
 }
 
 

@@ -75,6 +75,11 @@ DefineLogDomain(SyncPerf);
 }
 
 
+- (BOOL) resumesFromLocalCheckpoint {
+    return [_options[kCBLReplicatorOption_ResumeFromLocalCheckpoint] boolValue];
+}
+
+
 - (NSString*) remoteCheckpointDocIDForLocalUUID: (NSString*)localUUID
                                      continuous: (BOOL)continuous
 {

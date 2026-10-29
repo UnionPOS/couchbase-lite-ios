@@ -87,6 +87,22 @@ static NSString* checkpointInfoKey(NSString* checkpointID) {
 }
 
 
+static NSString* pendingRemoteCheckpointInfoKey(NSString* checkpointID) {
+    return [checkpointInfoKey(checkpointID) stringByAppendingString: @"/pending-remote"];
+}
+
+- (NSString*) pendingRemoteLastSequenceWithCheckpointID: (NSString*)checkpointID {
+    return [_storage infoForKey: pendingRemoteCheckpointInfoKey(checkpointID)];
+}
+
+- (BOOL) setPendingRemoteLastSequence: (NSString*)remoteLastSequence
+                     withCheckpointID: (NSString*)checkpointID
+{
+    return [_storage setInfo: remoteLastSequence
+                      forKey: pendingRemoteCheckpointInfoKey(checkpointID)] == kCBLStatusOK;
+}
+
+
 - (BOOL) saveLocalUUIDInLocalCheckpointDocument: (NSError**)outError {
     return [self putLocalCheckpointDocumentWithKey: kCBLDatabaseLocalCheckpoint_LocalUUID
                                              value: self.privateUUID

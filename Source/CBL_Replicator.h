@@ -36,6 +36,13 @@ extern NSString* CBL_ReplicatorProgressChangedNotification;
 /** Posted when replicator stops running. */
 extern NSString* CBL_ReplicatorStoppedNotification;
 
+/** Posted when the remote checkpoint disagrees with the local checkpoint (either side may be
+    missing). The userInfo carries the keys below. */
+extern NSString* CBL_ReplicatorCheckpointMismatchNotification;
+extern NSString* CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey;   // NSString, may be absent
+extern NSString* CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey;  // NSString, may be absent
+extern NSString* CBL_ReplicatorCheckpointMismatchResumedFromLocalKey;    // NSNumber (BOOL)
+
 
 
 /** Protocol that replicator implementations must implement. */

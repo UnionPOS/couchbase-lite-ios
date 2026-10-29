@@ -229,6 +229,15 @@ typedef void (^CBLAttachmentProgressBlock)(uint64_t bytesRead,
     notification rather than observing each property individually. */
 extern NSString* const kCBLReplicationChangeNotification;
 
+/** This notification is posted by a CBLReplication when the remote checkpoint disagrees with the
+    local checkpoint (either side may be missing). The userInfo contains the keys below. Whether
+    the replication then resumes from the local checkpoint or replicates from scratch depends on
+    the "resume_from_local_checkpoint" custom property. */
+extern NSString* const kCBLReplicationCheckpointMismatchNotification;
+extern NSString* const kCBLReplicationCheckpointMismatchLocalLastSequenceKey;   // NSString, may be absent
+extern NSString* const kCBLReplicationCheckpointMismatchRemoteLastSequenceKey;  // NSString, may be absent
+extern NSString* const kCBLReplicationCheckpointMismatchResumedFromLocalKey;    // NSNumber (BOOL)
+
 /** NSProgress userInfo key used to report an NSError when an attachment download fails. */
 extern NSString* const kCBLProgressErrorKey;
 

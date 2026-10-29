@@ -260,6 +260,7 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
     // Did client request a reset (i.e. starting over from first sequence?)
     if (_settings.options[kCBLReplicatorOption_Reset] != nil) {
         [db setLastSequence: nil withCheckpointID: self.remoteCheckpointDocID];
+        [db setPendingRemoteLastSequence: nil withCheckpointID: self.remoteCheckpointDocID];
     }
 
     // Note: This is actually a ref cycle, because the block has a (retained) reference to 'self',
@@ -754,6 +755,30 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
 }
 
 
+// Checkpoint sequences are integer strings, optionally followed by a ':'-separated suffix
+// (Sync Gateway compound sequences). Returns NO when either sequence has another format.
+static BOOL parseLeadingSequence(id sequence, SInt64* outSequence) {
+    NSString* string = [sequence description];
+    if (string.length == 0)
+        return NO;
+    NSScanner* scanner = [NSScanner scannerWithString: string];
+    scanner.charactersToBeSkipped = nil;
+    if (![scanner scanLongLong: outSequence] || *outSequence < 0)
+        return NO;
+    return scanner.isAtEnd || [string characterAtIndex: scanner.scanLocation] == ':';
+}
+
+
+// Whether `remoteSequence` is at or past `localSequence`, so that resuming from the local
+// checkpoint cannot skip changes the remote database no longer has.
+static BOOL remoteSequenceIsAtLeastLocal(id remoteSequence, id localSequence) {
+    SInt64 remote, local;
+    return parseLeadingSequence(remoteSequence, &remote)
+        && parseLeadingSequence(localSequence, &local)
+        && remote >= local;
+}
+
+
 // Fetches the given remote checkpoint doc and starts replicating from its sequence when it agrees
 // with the local one. A sibling checkpoint only seeds _lastSequence: it is never stored as this
 // replicator's own remote checkpoint, so the first -saveLastSequence creates our own doc.
@@ -805,8 +830,21 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
                           LogTo(Sync, @"%@: Replicating from lastSequence=%@%@", self, _lastSequence,
                                 (isSibling ? @" (seeded from sibling checkpoint)" : @""));
                       } else {
-                          LogTo(Sync, @"%@: lastSequence mismatch: I had %@, remote had %@ (response = %@)",
-                                self, localLastSequence, remoteLastSequence, response);
+                          BOOL resumeFromLocal = _settings.resumesFromLocalCheckpoint
+                                                 && !isSibling && localLastSequence != nil
+                                                 && [self canResumeFromLocalCheckpoint: localLastSequence
+                                                                  remoteLastSequence: remoteLastSequence
+                                                                        checkpointID: checkpointID];
+                          if (resumeFromLocal)
+                              _lastSequence = localLastSequence;
+                          LogTo(Sync, @"%@: lastSequence mismatch: I had %@, remote had %@%@ (response = %@)",
+                                self, localLastSequence, remoteLastSequence,
+                                (resumeFromLocal ? @"; resuming from local checkpoint"
+                                                 : @"; replicating from scratch"),
+                                response);
+                          [self postCheckpointMismatchWithLocalLastSequence: localLastSequence
+                                                         remoteLastSequence: remoteLastSequence
+                                                           resumedFromLocal: resumeFromLocal];
                       }
                       [self beginReplicating];
                   }
@@ -814,6 +852,43 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
           }
      ];
     [request dontLog404];
+}
+
+
+// The local sequence is where this database actually got to, so it is safe to resume from
+// whenever the remote database is the same one and has not lost sequences. A remote checkpoint
+// ahead of the local one means a save whose PUT landed but whose completion never ran. A remote
+// checkpoint behind (or missing) is either an interrupted save, which -saveLastSequence marks
+// with the remote sequence it was about to replace, or a remote database that was rolled back
+// or reset, in which case there is no mark that matches and a full replication is required.
+- (BOOL) canResumeFromLocalCheckpoint: (NSString*)localLastSequence
+                   remoteLastSequence: (NSString*)remoteLastSequence
+                         checkpointID: (NSString*)checkpointID
+{
+    if (remoteLastSequence && remoteSequenceIsAtLeastLocal(remoteLastSequence, localLastSequence))
+        return YES;
+    NSString* pendingRemoteLastSequence = [_db pendingRemoteLastSequenceWithCheckpointID: checkpointID];
+    if (!pendingRemoteLastSequence)
+        return NO;
+    return $equal(pendingRemoteLastSequence,
+                  remoteLastSequence.description ?: kCBLPendingRemoteCheckpointMissing);
+}
+
+
+- (void) postCheckpointMismatchWithLocalLastSequence: (NSString*)localLastSequence
+                                  remoteLastSequence: (NSString*)remoteLastSequence
+                                    resumedFromLocal: (BOOL)resumedFromLocal
+{
+    NSMutableDictionary* userInfo = $mdict({CBL_ReplicatorCheckpointMismatchResumedFromLocalKey,
+                                            @(resumedFromLocal)});
+    [userInfo setValue: localLastSequence
+                forKey: CBL_ReplicatorCheckpointMismatchLocalLastSequenceKey];
+    [userInfo setValue: remoteLastSequence
+                forKey: CBL_ReplicatorCheckpointMismatchRemoteLastSequenceKey];
+    [[NSNotificationCenter defaultCenter]
+            postNotificationName: CBL_ReplicatorCheckpointMismatchNotification
+                          object: self
+                        userInfo: userInfo];
 }
 
 
@@ -873,6 +948,17 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
     _savingCheckpoint = YES;
     [self asyncTaskStarted];
     NSString* checkpointID = self.remoteCheckpointDocID;
+    if (_settings.resumesFromLocalCheckpoint) {
+        // Record the sequence locally first so that a process kill during the PUT leaves the
+        // local checkpoint at the sequence actually processed, which is what the next launch
+        // resumes from on mismatch. The remote sequence being replaced is kept alongside it so
+        // that launch can tell an interrupted save from a rolled-back remote database.
+        CBLDatabase* strongDb = _db;
+        [strongDb setLastSequence: [lastSequence description] withCheckpointID: checkpointID];
+        [strongDb setPendingRemoteLastSequence: [_remoteCheckpoint[@"lastSequence"] description]
+                                                  ?: kCBLPendingRemoteCheckpointMissing
+                               withCheckpointID: checkpointID];
+    }
     CBLRemoteRequest* request = [_remoteSession startRequest: @"PUT"
                           path: [@"_local/" stringByAppendingString: checkpointID]
                           body: body
@@ -906,6 +992,7 @@ static NSString* const kSyncGatewayServerHeaderPrefix = @"Couchbase Sync Gateway
                 self.remoteCheckpoint = body;
                 [db setLastSequence: [lastSequence description]
                    withCheckpointID: checkpointID];
+                [db setPendingRemoteLastSequence: nil withCheckpointID: checkpointID];
                 LogTo(Sync, @"%@ saved remote checkpoint '%@' (_rev=%@)",
                       self, lastSequence, rev);
             }
