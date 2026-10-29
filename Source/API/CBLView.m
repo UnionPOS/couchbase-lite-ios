@@ -213,13 +213,23 @@ NSString* const kCBLViewChangeNotification = @"CBLViewChange";
 
 
 - (NSString*) documentType {
-    CBLDatabase* db = _weakDB;
-    return [db.shared valueForType: @"docType" name: _name inDatabaseNamed: db.name];
+    NSArray* types = self.documentTypes;
+    return types.count == 1 ? types[0] : nil;
 }
 
 - (void) setDocumentType: (NSString*)type {
+    self.documentTypes = type ? @[type] : nil;
+}
+
+- (NSArray<NSString*>*) documentTypes {
     CBLDatabase* db = _weakDB;
-    [db.shared setValue: type forType: @"docType" name: _name inDatabaseNamed: db.name];
+    return [db.shared valueForType: @"docTypes" name: _name inDatabaseNamed: db.name];
+}
+
+- (void) setDocumentTypes: (NSArray<NSString*>*)types {
+    CBLDatabase* db = _weakDB;
+    [db.shared setValue: (types.count > 0 ? [types copy] : nil)
+                forType: @"docTypes" name: _name inDatabaseNamed: db.name];
 }
 
 
