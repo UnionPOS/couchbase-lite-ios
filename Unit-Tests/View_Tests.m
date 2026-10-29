@@ -1631,4 +1631,33 @@ static NSString* const kUntrackedDocumentType = @"untracked";
 }
 
 
+// An untyped view in the pass disables the SQL doc_type filter, so documents without a "type"
+// reach the per-view check; they must be skipped by the typed view and mapped by the untyped one.
+- (void) test33_DocumentTypes_UntypedDocumentInMixedGroup {
+    if (!self.isSQLiteDB)
+        return;     // ForestDB storage filters by a single documentType only.
+    CBLView* typed = [db viewNamed: @"grp/peopleAndAardvarks"];
+    typed.documentTypes = @[@"person", @"aardvark"];
+    [typed setMapBlock: MAPBLOCK({
+        Assert([doc[@"type"] isEqual: @"person"] || [doc[@"type"] isEqual: @"aardvark"],
+               @"Mapped a %@ document", doc[@"type"]);
+        emit(doc[@"name"], nil);
+    }) version: @"1"];
+
+    CBLView* untyped = [db viewNamed: @"grp/everything"];
+    [untyped setMapBlock: MAPBLOCK({
+        emit(doc[@"name"], nil);
+    }) version: @"1"];
+
+    [self createDocumentWithProperties: @{@"type": @"person", @"name": @"mick"}];
+    [self createDocumentWithProperties: @{@"name": @"no type"}];
+    [self createDocumentWithProperties: @{@"type": @"aardvark", @"name": @"cerebus"}];
+
+    AssertEq([[typed createQuery] run: NULL].allObjects.count, 2u);
+    AssertEq([[untyped createQuery] run: NULL].allObjects.count, 3u);
+    AssertEq(typed.lastSequenceIndexed, db.lastSequenceNumber);
+    AssertEq(untyped.lastSequenceIndexed, db.lastSequenceNumber);
+}
+
+
 @end

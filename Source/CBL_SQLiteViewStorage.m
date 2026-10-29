@@ -530,7 +530,7 @@ void CBL_SQLiteViewStorageSetTracksIndexChanges(BOOL tracks) {
                     if (viewLastSequence[i] < realSequence) {
                         if (checkDocTypes) {
                             NSSet* viewDocTypeSet = viewDocTypes[curView.name];
-                            if (viewDocTypeSet && ![viewDocTypeSet containsObject: docType])
+                            if (viewDocTypeSet && (!docType || ![viewDocTypeSet containsObject: docType]))
                                 continue; // skip; view's documentTypes don't include this doc's
                         }
                         LogVerbose(View, @"#%lld: map \"%@\" for view %@...",
