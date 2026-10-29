@@ -96,6 +96,7 @@
         return;
 
     _pendingSequences = [NSMutableIndexSet indexSet];
+    _docIDsBeingPushed = _settings.skipsTombstonesOfUnknownDocuments ? [NSCountedSet set] : nil;
     _maxPendingSequence = [self.lastSequence longLongValue];
 
     if ([_settings.options[kCBLReplicatorOption_PurgePushed] isEqual: @YES]) {
@@ -179,6 +180,7 @@
     SequenceNumber seq = [_db getRevisionSequence: rev];
     Assert(seq > 0);
     [_pendingSequences addIndex: (NSUInteger)seq];
+    [_docIDsBeingPushed addObject: rev.docID];
     _maxPendingSequence = MAX(_maxPendingSequence, seq);
 }
 
@@ -189,6 +191,7 @@
     if (![_pendingSequences containsIndex: (NSUInteger)seq])
         Warn(@"%@ removePending: sequence %lld not in set, for rev %@", self, seq, rev);
     [_pendingSequences removeIndex: (NSUInteger)seq];
+    [_docIDsBeingPushed removeObject: rev.docID];
 
     if (wasFirst) {
         // If I removed the first pending sequence, can advance the checkpoint:
@@ -302,9 +305,11 @@
                     continue;
                 }
                 if (rev.deleted && _settings.skipsTombstonesOfUnknownDocuments
-                        && [$castIf(NSArray, revResults[@"possible_ancestors"]) count] == 0) {
-                    // The remote has no revision of this document, so the deletion has nothing
-                    // to apply to (Sync Gateway rejects such a tombstone outright).
+                        && [$castIf(NSArray, revResults[@"possible_ancestors"]) count] == 0
+                        && [_docIDsBeingPushed countForObject: rev.docID] == 1) {
+                    // The remote has no revision of this document and none is on its way there
+                    // (this tombstone is the document's only pending revision), so the deletion
+                    // has nothing to apply to; Sync Gateway rejects such a tombstone outright.
                     [self removePending: rev];
                     continue;
                 }

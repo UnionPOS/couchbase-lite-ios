@@ -21,6 +21,7 @@
     NSMutableArray* _uploaderQueue;
     BOOL _dontSendMultipart;
     NSMutableIndexSet* _pendingSequences;
+    NSCountedSet<NSString*>* _docIDsBeingPushed; // docIDs of the revs in _pendingSequences (skip-tombstones option only)
     SequenceNumber _maxPendingSequence;
     CBLBatcher* _purgeQueue;
 }

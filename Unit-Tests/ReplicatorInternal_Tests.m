@@ -1255,6 +1255,18 @@ static NSDictionary* skipTombstonesOptions(void) {
 }
 
 
+// Runs the run loop from inside a replicator callback until `condition` holds or `timeout` passes,
+// so that a change made in the callback is received and processed while the revision being
+// transformed is still in flight.
+static void runRunLoopUntil(BOOL (^condition)(void), NSTimeInterval timeout) {
+    NSDate* deadline = [NSDate dateWithTimeIntervalSinceNow: timeout];
+    while (!condition() && deadline.timeIntervalSinceNow > 0) {
+        [[NSRunLoop currentRunLoop] runMode: NSDefaultRunLoopMode
+                                 beforeDate: [NSDate dateWithTimeIntervalSinceNow: 0.1]];
+    }
+}
+
+
 // The listener's ten "deleted-N" docs were created and deleted before the local db ever saw them.
 - (void) test33_PullSkipsTombstonesOfUnknownDocuments {
     if (_newReplicator)
@@ -1361,6 +1373,74 @@ static NSDictionary* skipTombstonesOptions(void) {
 
     Assert([db[@"local-live"] deleteDocument: NULL]);
     [self runReplicator: settings];
+    AssertEq([self statusOfDocument: @"local-live" in: listenerDB], kCBLStatusDeleted);
+
+    [listener stop];
+}
+
+
+// A deletion that arrives while a live revision of the same document is still being pulled is
+// not a tombstone of an unknown document; it must be stored once that revision lands.
+- (void) test39_PullKeepsTombstonesOfDocumentsBeingPulled {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+
+    CBL_ReplicatorSettings* settings = [[CBL_ReplicatorSettings alloc] initWithRemote: remoteURL push: NO];
+    settings.continuous = YES;
+    settings.options = skipTombstonesOptions();
+    __block BOOL deletedOnRemote = NO;
+    settings.revisionBodyTransformationBlock = ^CBL_Revision*(CBL_Revision* rev) {
+        if (!deletedOnRemote && [rev.docID isEqualToString: @"live-1"]) {
+            // "live-1" is downloaded but not inserted yet. Delete it on the remote and let the
+            // puller receive and process that deletion before the download is handed on.
+            deletedOnRemote = YES;
+            Assert([listenerDB[@"live-1"] deleteDocument: NULL]);
+            runRunLoopUntil(^BOOL{ return [self statusOfDocument: @"live-1" in: db] == kCBLStatusDeleted; }, 5.0);
+        }
+        return rev;
+    };
+    id<CBL_Replicator> repl = [self runContinuousReplicator: settings];
+    Assert(deletedOnRemote);
+    NSString* listenerLastSequence = $sprintf(@"%lld", listenerDB.lastSequenceNumber);
+    AssertEqual([repl.lastSequence description], listenerLastSequence);
+    AssertEq([self statusOfDocument: @"live-1" in: db], kCBLStatusDeleted);
+    AssertEq(db.documentCount, (unsigned)(kSeedLiveDocCount - 1));
+
+    [listener stop];
+}
+
+
+// A deletion made while the document's live revision is still being uploaded is not a tombstone
+// of a document the remote never had; it must be pushed once that revision lands.
+- (void) test40_PushKeepsTombstonesOfDocumentsBeingPushed {
+    if (_newReplicator)
+        return;
+    CBLDatabase* listenerDB;
+    CBLListener* listener = [self startSeedListenerWithDatabase: &listenerDB];
+    NSURL* remoteURL = [self seedListenerURLForDatabase: listenerDB listener: listener];
+    CBLUnsavedRevision* liveRev = db[@"local-live"].newRevision;
+    liveRev[@"index"] = @1;
+    Assert([liveRev save: NULL]);
+
+    CBL_ReplicatorSettings* settings = [[CBL_ReplicatorSettings alloc] initWithRemote: remoteURL push: YES];
+    settings.continuous = YES;
+    settings.options = skipTombstonesOptions();
+    __block BOOL deletedLocally = NO;
+    settings.revisionBodyTransformationBlock = ^CBL_Revision*(CBL_Revision* rev) {
+        if (!deletedLocally && [rev.docID isEqualToString: @"local-live"]) {
+            // "local-live" is about to be uploaded. Delete it locally and let the pusher process
+            // that deletion before the upload is sent.
+            deletedLocally = YES;
+            Assert([db[@"local-live"] deleteDocument: NULL]);
+            runRunLoopUntil(^BOOL{ return [self statusOfDocument: @"local-live" in: listenerDB] == kCBLStatusDeleted; }, 5.0);
+        }
+        return rev;
+    };
+    [self runContinuousReplicator: settings];
+    Assert(deletedLocally);
     AssertEq([self statusOfDocument: @"local-live" in: listenerDB], kCBLStatusDeleted);
 
     [listener stop];
@@ -1484,6 +1564,12 @@ static NSDictionary* skipTombstonesOptions(void) {
     CBL_ReplicatorSettings* settings = [[CBL_ReplicatorSettings alloc] initWithRemote: remoteURL push: NO];
     settings.continuous = YES;
     settings.options = options;
+    return [self runContinuousReplicator: settings];
+}
+
+
+// Starts a continuous replicator, stops it once it has gone active and then idle, and returns it.
+- (id<CBL_Replicator>) runContinuousReplicator: (CBL_ReplicatorSettings*)settings {
     id<CBL_Replicator> repl = [[dbmgr.replicatorClass alloc] initWithDB: db settings: settings];
     [repl start];
 
